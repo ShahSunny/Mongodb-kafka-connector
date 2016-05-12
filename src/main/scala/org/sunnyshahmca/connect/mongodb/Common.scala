@@ -1,6 +1,7 @@
 package org.sunnyshahmca.connect.mongodb
 package object Common {
   import scala.concurrent.{ExecutionContext, Future, Promise, blocking}
+  import scala.concurrent.duration._
   import ExecutionContext.Implicits.global
   import scala.util.{Try, Success, Failure}
 
@@ -12,11 +13,11 @@ package object Common {
   }
 
   case class MaxRetriesAllowed(r:Int)
-  case class DelayBetweenRetries(d:Int)
-  
+  case class DelayBetweenRetries(d:Duration)
+
   object OpRetrierImplicits  {
     implicit val m = MaxRetriesAllowed(10)
-    implicit val d = DelayBetweenRetries(1000)
+    implicit val d = DelayBetweenRetries(Duration(1, SECONDS))
   }
   
   def OpRetrier[T]( op: () => Future[T], retriesMade:Int = 0)
@@ -28,8 +29,8 @@ package object Common {
     } else if (maxRetriesAllowed.r < retriesMade) {
       promise.failure(new IllegalArgumentException("maxRetriesAllowed = " + maxRetriesAllowed.r + " retriesMade = " + retriesMade + ", max_retries can't be < retriesMade"))
     } else {
-      val resultF = if( retriesMade == 0 || delayBetweenRetries.d <= 0 ) op()
-                    else Future { blocking { Try{Thread.sleep(delayBetweenRetries.d)} } }.flatMap((t) => op())
+      val resultF = if( retriesMade == 0 || delayBetweenRetries.d.toMillis <= 0 ) op()
+                    else Future { blocking { Try{Thread.sleep(delayBetweenRetries.d.toMillis)} } }.flatMap((t) => op())
       resultF.onSuccess { case result => promise.success(result) } 
       resultF.onFailure { 
         case e:Throwable => 
@@ -39,11 +40,10 @@ package object Common {
             promise.failure(e)
           } else {
             println("Might get one more chance, retries made = " + nretriesMade)
-            promise.completeWith(OpRetrier(op, retriesMade+1))
+            promise.completeWith(OpRetrier(op, retriesMade+1)(maxRetriesAllowed, delayBetweenRetries))
           }
       }
     }
     promise.future
   }
-
 }
