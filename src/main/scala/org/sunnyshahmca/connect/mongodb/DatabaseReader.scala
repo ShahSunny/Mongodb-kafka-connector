@@ -10,12 +10,12 @@ package object DatabaseReader {
   def getAvailableCollections(mongoClient:MongoClient, database:MongoDatabase)
     (implicit maxRetriesAllowed:MaxRetriesAllowed, delayBetweenRetries:DelayBetweenRetries)
     :Future[Seq[String]] = {
-    val collectionNames = OpRetrier(() => database.listCollectionNames().toFuture)
+    val collectionNames = OpRetrier(() => database.listCollectionNames().toFuture)(maxRetriesAllowed,delayBetweenRetries)
     collectionNames.map{ _.filter { ! _.startsWith("system.") } }
   }
 
   def availableDatabases(mongoClient:MongoClient)
   (implicit maxRetriesAllowed:MaxRetriesAllowed, delayBetweenRetries:DelayBetweenRetries):Future[Seq[String]]
-   = { OpRetrier(() => mongoClient.listDatabaseNames().toFuture) }
+   = { OpRetrier(() => mongoClient.listDatabaseNames().toFuture)(maxRetriesAllowed,delayBetweenRetries) }
    
 }

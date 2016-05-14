@@ -10,5 +10,7 @@ libraryDependencies ++= Seq (
 )
 libraryDependencies += "org.apache.avro" % "avro" % "1.8.0"
 libraryDependencies += "org.mongodb.scala" %% "mongo-scala-driver" % "1.1.1"
+libraryDependencies += "ch.qos.logback" % "logback-classic" % "1.1.7"
+libraryDependencies += "org.slf4j" % "slf4j-api" % "1.7.21"
 
 scalacOptions in Test ++= Seq("-Yrangepos")
