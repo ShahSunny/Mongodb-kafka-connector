@@ -4,6 +4,8 @@ package object Common {
   import scala.concurrent.duration._
   import ExecutionContext.Implicits.global
   import scala.util.{Try, Success, Failure}
+  import org.slf4j.{Logger,LoggerFactory}
+  val logger = LoggerFactory.getLogger(this.getClass);  
 
   def successRace[T](f: Future[T], g: => Future[T]): Future[T] = {
     val p = Promise[T]()
@@ -36,10 +38,10 @@ package object Common {
         case e:Throwable => 
           val nretriesMade = retriesMade + 1
           if(nretriesMade >= maxRetriesAllowed.r) {
-            println("That's it! Already made " + nretriesMade + " retries.")
+            logger.info("That's it! Already made {} retries", nretriesMade)
             promise.failure(e)
           } else {
-            println("Might get one more chance, retries made = " + nretriesMade)
+            logger.info("Might get one more chance, retries made = {}", nretriesMade)
             promise.completeWith(OpRetrier(op, retriesMade+1)(maxRetriesAllowed, delayBetweenRetries))
           }
       }

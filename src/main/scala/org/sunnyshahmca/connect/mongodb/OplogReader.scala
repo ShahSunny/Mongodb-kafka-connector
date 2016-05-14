@@ -10,7 +10,10 @@ package object OplogReader {
   import org.bson.{BsonValue,BsonString, BsonObjectId, BsonTimestamp}
   import com.mongodb.CursorType
   import Common._
+  import org.slf4j.{Logger,LoggerFactory}
   
+  val logger = LoggerFactory.getLogger(this.getClass);  
+
   type RequestId = Int
   type AllRecordsFuture = Future[Int]
   type FirstRecordFuture = Future[(Long, AllRecordsFuture)]
@@ -45,48 +48,48 @@ package object OplogReader {
   def oplogDataWatcher(recordPooler:RecordPooler, maxWaitAllowed:Duration, maxWaitForSubsequentRecords:Duration)  
         (implicit ec:ExecutionContext) : Future[Seq[(Long,Document)]] = {
 
-      val requestFuture = recordPooler.request match {
-        case Right((requestId:Int, f:FirstRecordFuture)) => { 
-          println("oplogDataWatcher:: requestId = " + requestId + "first record future received")
-          val allRecordsReceivedOrFirstRecordTimeOutFuture:Future[Int] = f.flatMap {
-            case (firstRecordReceivedMs:Long, allRecordsReceived:Future[Int]) => {
-              val firstRecordFreshnessTimeout:Long =  (firstRecordReceivedMs + maxWaitForSubsequentRecords.toMillis) - System.currentTimeMillis()
-              def firstRecordTimeOutFuture = if(firstRecordFreshnessTimeout > 0) {
-                println("oplogDataWatcher:: requestId = " + requestId + " " + firstRecordFreshnessTimeout + " going into the timeout!"); 
-                Future{ blocking { 
-                  try{Thread.sleep(firstRecordFreshnessTimeout)} catch { case _:Throwable => {} } 
-                  println("oplogDataWatcher:: requestId = " + requestId + " Timeout = " + firstRecordFreshnessTimeout)
-                  requestId
-                } }
-              } else { 
-                println("oplogDataWatcher:: first record is already timedout requestId = " + requestId + firstRecordFreshnessTimeout); 
-                Future.successful(requestId)
-              }
-              allRecordsReceived.onSuccess{ case _ => println("oplogDataWatcher:: allRecordsReceived onSuccess requestId = " + requestId) }
-              val firstRace = successRace(allRecordsReceived, firstRecordTimeOutFuture)
-              firstRace.onComplete{ case _ => println("firstRace won  requestId = " + requestId) }
-              firstRace
+    val requestFuture = recordPooler.request match {
+      case Right((requestId:Int, f:FirstRecordFuture)) => { 
+        logger.info("oplogDataWatcher:: requestId = {} first record future received", requestId )
+        val allRecordsReceivedOrFirstRecordTimeOutFuture:Future[Int] = f.flatMap {
+          case (firstRecordReceivedMs:Long, allRecordsReceived:Future[Int]) => {
+            val firstRecordFreshnessTimeout:Long =  (firstRecordReceivedMs + maxWaitForSubsequentRecords.toMillis) - System.currentTimeMillis()
+            def firstRecordTimeOutFuture = if(firstRecordFreshnessTimeout > 0) {
+              logger.debug("oplogDataWatcher:: requestId = {} going into the timeout for {}",requestId, firstRecordFreshnessTimeout); 
+              Future{ blocking { 
+                try{Thread.sleep(firstRecordFreshnessTimeout)} catch { case _:Throwable => {} } 
+                logger.trace("oplogDataWatcher:: requestId = {} Timeout = {}", requestId, firstRecordFreshnessTimeout)
+                requestId
+              } }
+            } else { 
+              logger.trace("oplogDataWatcher:: first record is already timedout requestId = {} Timeout = {}", requestId, firstRecordFreshnessTimeout); 
+              Future.successful(requestId)
             }
+            allRecordsReceived.onSuccess{ case _ => logger.trace("oplogDataWatcher:: allRecordsReceived onSuccess requestId = {}", requestId) }
+            val firstRace = successRace(allRecordsReceived, firstRecordTimeOutFuture)
+            firstRace.onComplete{ case _ => logger.info("firstRace won  requestId = {}", requestId) }
+            firstRace
           }
-          def maxWaitTimeoutFuture = Future { blocking { try{Thread.sleep(maxWaitAllowed.toMillis)} catch { case _:Throwable => {} } 
-            println("maxWaitTimeoutFuture done requestId = " + requestId  + maxWaitAllowed.toMillis);
-            requestId
-          } }
-          val secondRace:Future[Int] = successRace(allRecordsReceivedOrFirstRecordTimeOutFuture, maxWaitTimeoutFuture)
-          secondRace.onComplete{ case _ => println("secondRace won requestId = " + requestId) }
-          secondRace
         }
-
-        case Left(requestId:Int) => { 
-          println("all the records are already available requestId = " + requestId); 
-          Future.successful(requestId)
-        }
+        def maxWaitTimeoutFuture = Future { blocking { try{Thread.sleep(maxWaitAllowed.toMillis)} catch { case _:Throwable => {} } 
+          logger.trace("maxWaitTimeoutFuture done requestId = {} maxWaitAllowed = {}", requestId, maxWaitAllowed.toMillis);
+          requestId
+        } }
+        val secondRace:Future[Int] = successRace(allRecordsReceivedOrFirstRecordTimeOutFuture, maxWaitTimeoutFuture)
+        secondRace.onComplete{ case _ => logger.info("secondRace won requestId = {}", requestId) }
+        secondRace
       }
 
-      requestFuture.map { (requestId) => {
-        println("request finished requestId = " + requestId)
-        recordPooler.getAllAvailableRecords
-      }}
+      case Left(requestId:Int) => { 
+        logger.info("all the records are already available requestId = {}", requestId); 
+        Future.successful(requestId)
+      }
+    }
+
+    requestFuture.map { (requestId) => {
+      logger.info("request finished requestId = {}", requestId)
+      recordPooler.getAllAvailableRecords
+    }}
   }
 
 
@@ -95,46 +98,47 @@ package object OplogReader {
     var receivedRecordsCounter = 0
     var requestedRecords = -1
     var isEnabled = true
-    
+    val logger = LoggerFactory.getLogger(this.getClass) 
+
     override def onNext(doc: Document): Unit = {
       if(isEnabled && requestedRecords > 0) {
         receivedRecordsCounter = receivedRecordsCounter + 1
-        println("OplogObserver:: onNext Result [" + receivedRecordsCounter+"/"+requestedRecords+"]: " + doc.toString)
+        logger.debug("onNext Result [ {} / {} ]",receivedRecordsCounter,requestedRecords)
         m.onNextDoc(doc)
         if(receivedRecordsCounter == requestedRecords) {
           receivedRecordsCounter = 0
           val recordsTorequest = m.onSubscriptionOver
-          println("OplogObserver::onNext = " + recordsTorequest) 
+          logger.trace("onNext = {}", recordsTorequest) 
           if(isEnabled) requestRecords(recordsTorequest)
         }
       } else if (isEnabled && requestedRecords == 0) {
-        System.err.println("OplogObserver::onNext requestedRecords is ZERO, Still received record, Skipping it! " + doc.toString)  
+        logger.error("onNext requestedRecords is ZERO, Still received record, Skipping it! {}" + doc.toString)  
       } else {
-        println("OplogObserver::onNext Disabled, Skiiping the record " + doc.toString)
+        logger.error("onNext Disabled, Skiiping the record {}" + doc.toString)
       }    
     }
 
     override def onError(e: Throwable): Unit = {
       if(isEnabled){ 
-        println("OplogObserver::onError error received " + e) 
+        logger.error("onError error received {}", e) 
         m.onError(e)
       } else {
-        println("OplogObserver::onError Disabled, Error received " + e) 
+        logger.error("onError Disabled, Error received {}", e) 
       }
     }
 
     override def onSubscribe(subscription: Subscription): Unit = {
       m_subscription = subscription
-      println("OplogObserver::onSubscribe requesting " + requestedRecords + " records ")
+      logger.trace("onSubscribe requesting {} records", requestedRecords )
       requestRecords(requestedRecords)
     }
 
     def requestRecords(rc:Int):Boolean = {
-      println("OplogObserver::requestRecords rc = " + rc)
+      logger.trace("requestRecords rc = {}",rc)
       val requestCount = if(rc < 0) m.onSubscriptionOver else rc
-      println("OplogObserver::requestRecords requestCount = " + requestCount)
+      logger.debug("requestRecords requestCount = {}",requestCount)
       if(receivedRecordsCounter != 0) {
-        System.err.println("Error: OplogObserver::requestRecords requestRecords with receivedRecordsCounter = " + receivedRecordsCounter)
+        logger.error("Error: requestRecords requestRecords with receivedRecordsCounter = {}",receivedRecordsCounter)
       }
       receivedRecordsCounter = 0
       requestedRecords = requestCount
@@ -142,7 +146,7 @@ package object OplogReader {
         m_subscription.request(requestCount)
         true
       } else {
-        println("OplogObserver::requestRecords did not request, recordCount <=0 " + requestCount)
+        logger.debug("requestRecords did not request, recordCount <=0 {}", requestCount)
         false
       }
     }
@@ -150,7 +154,7 @@ package object OplogReader {
     override def onComplete(): Unit = { println("onComplete received, Not doing anything!")  }
     def disable:Boolean = { 
       val copyIsEnabled = isEnabled; 
-      println("disabling the observer, unsubscribed!");  
+      logger.debug("disabling the observer, unsubscribed!");  
       isEnabled = false; 
       m_subscription.unsubscribe 
       copyIsEnabled
@@ -181,19 +185,20 @@ package object OplogReader {
     var lastRecordReceivedAt    = System.currentTimeMillis
 
     var requestId:Int = 0
+    val logger = LoggerFactory.getLogger(this.getClass) 
 
     def createBlankQueue = immutable.Queue[(Long, Document)]()
     def request: Either[RequestId, RequestIDWithFirstRecordFuture] = {
       requestId = requestId + 1
       if(queueRecords.size == maxRecords) {
-          println("RecordPooler::request queueRecords.size == maxRecords")
+          logger.debug("RecordPooler::request queueRecords.size == maxRecords")
           Left(requestId)
       } else {
         this.synchronized {
-          println("RecordPooler::request queueRecords.size != maxRecords")
+          logger.debug("RecordPooler::request queueRecords.size != maxRecords")
           resetPromises()
           if(queueRecords.size >= 1) {
-            println("RecordPooler::request queueRecords.size >= 1 Calling success of firstRecord Promise")
+            logger.debug("RecordPooler::request queueRecords.size >= 1 Calling success of firstRecord Promise")
             sendSuccessForFirstRecordPromise 
           }
           recreateObserverIfNeeded
@@ -204,47 +209,47 @@ package object OplogReader {
 
     def sendSuccessForFirstRecordPromise =  {
       val firstRecordPromiseResult = (queueRecords.front._1, allRecordsPromise.future)
-      println("RecordPooler::sendSuccessForFirstRecordPromise firstRecordPromiseResult = " + firstRecordPromiseResult)
+      logger.trace("RecordPooler::sendSuccessForFirstRecordPromise firstRecordPromiseResult = {}", firstRecordPromiseResult)
       firstRecordPromise.trySuccess(firstRecordPromiseResult)
     }
 
     def sendSuccessForAllRecordsPromise = {
-      println("RecordPooler::sendSuccessForAllRecordsPromise ")
+      logger.trace("RecordPooler::sendSuccessForAllRecordsPromise ")
       allRecordsPromise.trySuccess(requestId)
     }
 
     def recreateObserverIfNeeded = {
       val currentTime = System.currentTimeMillis
       if(currentTime - lastRecordReceivedAt > observerRestartTimeout.d.toMillis) {
-        println("RecordPooler::recreateObserverIfNeeded observer stale since  " + (currentTime - lastRecordReceivedAt) + " Timeout = " + observerRestartTimeout.d.toMillis )
+        logger.warn("RecordPooler::recreateObserverIfNeeded observer stale since  {}  Timeout = {}", (currentTime - lastRecordReceivedAt), observerRestartTimeout.d.toMillis )
         recreateObserver
       } else {
-        println("RecordPooler::recreateObserverIfNeeded observer is active  " + (currentTime - lastRecordReceivedAt) + " Timeout = " + observerRestartTimeout.d.toMillis )
+        logger.trace("RecordPooler::recreateObserverIfNeeded observer is active  " + (currentTime - lastRecordReceivedAt) + " Timeout = " + observerRestartTimeout.d.toMillis )
       }
     }
 
     def resetPromises() = {
-      println("RecordPooler::resetPromises" )
+      logger.trace("RecordPooler::resetPromises" )
       completePromises()
       firstRecordPromise  = Promise[(Long, Future[Int])]
       allRecordsPromise   = Promise[Int]
     }
 
     def completePromises() = {
-      println("RecordPooler::completePromises" )
+      logger.trace("RecordPooler::completePromises" )
       val e = new RecordPoolerException("getAllAvailableRecords got called, terminating the lingering current promises")
       firstRecordPromise.tryFailure(e)
       allRecordsPromise.tryFailure(e)
     }
 
     def getAllAvailableRecords():Seq[(Long,Document)] = {
-      println("RecordPooler::getAllAvailableRecords" )
+      logger.debug("RecordPooler::getAllAvailableRecords" )
       this.synchronized {
         val backupQueueRecords = queueRecords
         queueRecords = createBlankQueue
         completePromises
         if(backupQueueRecords.size == maxRecords) {
-          println("RecordPooler::getAllAvailableRecords backupQueueRecords.size == maxRecords, requestRecords" )
+          logger.debug("RecordPooler::getAllAvailableRecords backupQueueRecords.size == maxRecords, requestRecords" )
           requestRecords
         }
         backupQueueRecords
@@ -252,44 +257,44 @@ package object OplogReader {
     }
 
     def createObserver = {
-      println("RecordPooler::createObserver")
+      logger.trace("RecordPooler::createObserver")
       oplogObservableFactory(curOplogRecordTimeStamp, this, mongoClient)
     }
 
     def recreateObserver = { 
-      println("RecordPooler::recreateObserver")
+      logger.trace("RecordPooler::recreateObserver")
       m_oplogObserver.disable; m_oplogObserver = createObserver 
     }
-    def onError(e:Throwable) = { println("RecordPooler::onError" + e); this.synchronized { recreateObserver } }
-    def requestRecords = { println("RecordPooler::requestRecords"); m_oplogObserver.requestRecords(onSubscriptionOver) }
+    def onError(e:Throwable) = { logger.error("RecordPooler::onError {}", e); this.synchronized { recreateObserver } }
+    def requestRecords = { logger.trace("RecordPooler::requestRecords"); m_oplogObserver.requestRecords(onSubscriptionOver) }
 
     def onNextDoc(doc:Document) = {
       if (queueRecords.size == maxRecords) {
-        System.err.println("ERROR: RecordPooler::onNextDoc queueRecords.size == maxRecords, Rejecting the record " + doc)
+        logger.error("RecordPooler::onNextDoc queueRecords.size == maxRecords, Rejecting the record {}", doc)
       } else {
         this.synchronized {
           curOplogRecordTimeStamp = Some(doc("ts"))
           lastRecordReceivedAt = System.currentTimeMillis()
           if(doc("op") != noOp) {
             queueRecords = queueRecords :+ (lastRecordReceivedAt, doc)
-            println("RecordPooler::onNextDoc doc is not noOp, Queue size = " + queueRecords.size)
+            logger.debug("RecordPooler::onNextDoc doc is not noOp, Queue size = {}", queueRecords.size)
             if (queueRecords.size == maxRecords) {
-              println("RecordPooler::onNextDoc queueRecords.size == maxRecords, sendSuccessForAllRecordsPromise ")
+              logger.info("RecordPooler::onNextDoc queueRecords.size == maxRecords, sendSuccessForAllRecordsPromise ")
               sendSuccessForAllRecordsPromise
             } else if (queueRecords.size == 1) {
-              println("RecordPooler::onNextDoc queueRecords.size == 1, sendSuccessForFirstRecordPromise ")
+              logger.info("RecordPooler::onNextDoc queueRecords.size == 1, sendSuccessForFirstRecordPromise ")
               sendSuccessForFirstRecordPromise
             }
           } else {
-              println("RecordPooler::onNextDoc doc is noOp, Queue size = " + queueRecords.size)
+              logger.trace("RecordPooler::onNextDoc doc is noOp, Queue size = {}", queueRecords.size)
           }
         }//synchronized end
       }
     }
 
     def onSubscriptionOver = { 
-      val recordsToRequest = maxRecords - queueRecords.size;  
-      println("RecordPooler::onSubscriptionOver recordsToRequest = " + recordsToRequest)
+      val recordsToRequest = maxRecords - queueRecords.size;
+      logger.trace("RecordPooler::onSubscriptionOver recordsToRequest = {}", recordsToRequest)
       recordsToRequest
     }
   }
@@ -302,15 +307,15 @@ package object OplogReader {
     val unFilteredCollectionRecords = collection.find(filterDocument).cursorType(CursorType.TailableAwait)
     val collectRecords = lastRecord match {
       case Some(lr:BsonValue) => {
-        println("actualOplogObservableFactory lastRecord = " + lr)
+        logger.info("actualOplogObservableFactory lastRecord = {}", lr)
         unFilteredCollectionRecords.filter(Document("ts" -> Document("$gt" -> lr))) 
       }
       case None => {
-        println("actualOplogObservableFactory No lastRecord = " )
+        logger.error("actualOplogObservableFactory No lastRecord = " )
         unFilteredCollectionRecords
       } 
     }
-    println("actualOplogObservableFactory observerMaster's remaining are " + observerMaster.onSubscriptionOver) 
+    logger.trace("actualOplogObservableFactory observerMaster's remaining are ", observerMaster.onSubscriptionOver) 
     val oplogObserver = new OplogObserver(observerMaster)
     collectRecords.subscribe(oplogObserver)
     oplogObserver

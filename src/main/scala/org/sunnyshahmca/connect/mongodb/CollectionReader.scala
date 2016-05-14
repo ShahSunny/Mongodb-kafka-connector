@@ -7,6 +7,9 @@ package object CollectionReader {
   import scala.concurrent.duration._
   import scala.concurrent.Future
   import Common._
+  import org.slf4j.{Logger,LoggerFactory}
+
+  val logger = LoggerFactory.getLogger(this.getClass);
 
   case class MaxServerCursorTimeOut(d:Duration)
   case class MaxNoOfRecordsToExtract(v:Int)
@@ -15,11 +18,11 @@ package object CollectionReader {
   def extractNewMin(records:Seq[Document], maxRecordsRequested:Int):
                 (Seq[Document], Option[BsonValue]) = {
     if(records.size < maxRecordsRequested) {
-      println("CollectionReader::extractNewMin records.size < maxRecordsRequested, No Min found")
+      logger.debug("CollectionReader::extractNewMin records.size < maxRecordsRequested, No Min found")
       //This means we have reached the last record.
       (records, None)
     } else {
-      println("CollectionReader::extractNewMin start next fetch from ", records.last.get("_id"))
+      logger.debug("CollectionReader::extractNewMin start next fetch from {}", records.last.get("_id"))
       (records.take(records.size - 1), records.last.get("_id"))
     }
   }
@@ -31,11 +34,11 @@ package object CollectionReader {
     startValuefor_Id match {
       case Some(v) => {
         val minCap = Document("$min" -> Document("_id" -> v ))
-        println("CollectionReader::addMinMaxCap Added min cap ", minCap)
+        logger.debug("CollectionReader::addMinMaxCap Added min cap {}", minCap)
         collectionWithMaxCap.modifiers(minCap)
       } 
       case None => {
-        println("CollectionReader::addMinMaxCap No min cap to add")
+        logger.debug("CollectionReader::addMinMaxCap No min cap to add")
         collectionWithMaxCap
       }
     }
@@ -55,14 +58,14 @@ package object CollectionReader {
     val collectionRecordsWithMin = addMinMaxCap(collectRecords, startValuefor_Id, maxValuefor_Id)
     collectRecords.toFuture.map(extractNewMin(_,maxRecordsRequired)).flatMap( _ match {
         case (records, None) => {
-          println("CollectionReader::extractRecords Now trying to fetch the max record ( last record ) : " + maxValuefor_Id)
+          logger.trace("CollectionReader::extractRecords Now trying to fetch the max record ( last record ) : {}", maxValuefor_Id)
           collection.find(Document("_id" -> maxValuefor_Id)).maxTime(timeout.d).toFuture.map {
             case maxValueRecord:Seq[Document] if maxValueRecord.size > 0 => {
-              println("CollectionReader::extractRecords Found the last record! : ", maxValueRecord)
+              logger.info("CollectionReader::extractRecords Found the last record! : ", maxValueRecord)
               (records ++ maxValueRecord, None)
             }
             case _ => {
-              println("CollectionReader::extractRecords Looks like the max record is not available with the server! : ", maxValuefor_Id)
+              logger.warn("CollectionReader::extractRecords Looks like the max record is not available with the server! : {}", maxValuefor_Id)
               (records, None)
             }
           }
@@ -76,11 +79,11 @@ package object CollectionReader {
     collection.find().sort(Document("_id" -> -1)).first.toFuture.map{ (records) => 
       if(records.size > 0) {
         val maxId = records.last.get("_id")
-        println("CollectionReader::findMaxIDValue found the max _id ", maxId)
+        logger.info("CollectionReader::findMaxIDValue found the max _id {}", maxId)
         maxId
       }
       else {
-        println("CollectionReader::findMaxIDValue couldn't find the max _id ")
+        logger.error("CollectionReader::findMaxIDValue couldn't find the max _id ")
         None
       }
     }
@@ -94,12 +97,18 @@ package object CollectionReader {
     var newRecordCount = recordCount
     OpRetrier(() => extractRecords(collection,maxValue,startValuefor_Id)).flatMap { 
       case (records,Some(newMinValue)) => {
-        for(record <- records) { println( newRecordCount + " ==> " + record); newRecordCount = newRecordCount + 1 } 
+        for(record <- records) { 
+          logger.info("{} ==> {}", newRecordCount, record); 
+          newRecordCount = newRecordCount + 1 
+        } 
         readRecords(collection, maxValue, Some(newMinValue), newRecordCount)
 
       }
       case (records,None) => { 
-        for(record <- records) { println( newRecordCount + " ==> " + record); newRecordCount = newRecordCount + 1 } 
+        for(record <- records) { 
+          logger.info("{} ==> {}",newRecordCount,record); 
+          newRecordCount = newRecordCount + 1 
+        } 
         Future.successful(Nil, None)
       }
     }
