@@ -1,11 +1,11 @@
 package org.sunnyshahmca.connect.mongodb
 
-package object DatabaseReader {
+package object databaseReader {
   import org.mongodb.scala.{MongoClient,MongoDatabase,MongoCollection,Document,FindObservable}
   import scala.concurrent.{ExecutionContext, Future}
   import scala.concurrent.ExecutionContext.Implicits.global
-  import Common._
-  import Common.OpRetrierImplicits._
+  import common._
+  import common.OpRetrierImplicits._
 
   def getAvailableCollections(mongoClient:MongoClient, database:MongoDatabase)
     (implicit maxRetriesAllowed:MaxRetriesAllowed, delayBetweenRetries:DelayBetweenRetries)

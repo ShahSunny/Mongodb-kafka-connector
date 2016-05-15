@@ -1,12 +1,12 @@
 package org.sunnyshahmca.connect.mongodb
 
-package object CollectionReader {
+package object collectionReader {
   import org.mongodb.scala.{MongoClient,MongoDatabase,MongoCollection,Document,FindObservable}
   import org.mongodb.scala.bson.{BsonObjectId,BsonValue}
   import scala.concurrent.ExecutionContext.Implicits.global
   import scala.concurrent.duration._
   import scala.concurrent.Future
-  import Common._
+  import common._
   import org.slf4j.{Logger,LoggerFactory}
 
   val logger = LoggerFactory.getLogger(this.getClass);
@@ -119,7 +119,7 @@ package object CollectionReader {
     val collection: MongoCollection[Document] = database.getCollection(colllectionName)  
     implicit val timeout = MaxServerCursorTimeOut(Duration(1,MINUTES))
     implicit val maxRecords = MaxNoOfRecordsToExtract(32)
-    import Common.OpRetrierImplicits._
+    import common.OpRetrierImplicits._
 
     val finalResult = findMaxIDValue(collection).flatMap{ 
       case Some(maxValue) => readRecords(collection, maxValue, None)

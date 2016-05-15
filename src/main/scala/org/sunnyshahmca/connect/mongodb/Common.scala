@@ -1,5 +1,5 @@
 package org.sunnyshahmca.connect.mongodb
-package object Common {
+package object common {
   import scala.concurrent.{ExecutionContext, Future, Promise, blocking}
   import scala.concurrent.duration._
   import ExecutionContext.Implicits.global

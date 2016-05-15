@@ -1,5 +1,5 @@
 package org.sunnyshahmca.connect.mongodb
-package object OplogReader {
+package object oplogReader {
   import org.bson.BsonTimestamp
   import scala.concurrent.{ExecutionContext, Future, Promise, blocking}
   import scala.util._
@@ -9,7 +9,7 @@ package object OplogReader {
   import scala.concurrent.{Future, Promise}
   import org.bson.{BsonValue,BsonString, BsonObjectId, BsonTimestamp}
   import com.mongodb.CursorType
-  import Common._
+  import common._
   import org.slf4j.{Logger,LoggerFactory}
   
   val logger = LoggerFactory.getLogger(this.getClass);  
