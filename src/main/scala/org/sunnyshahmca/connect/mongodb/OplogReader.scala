@@ -343,11 +343,12 @@ package object oplogReader {
 
     implicit object dummySleeper extends Sleeper {
       var listPromises = List[(Promise[Int], Long, Int)]()
+      var isDoneOnce = false
       def sleep[T](msSleep:Long, value:T, beforeSleepTrigger:()=>Unit = ()=>{}, afterSleepTrigger:()=>Unit = ()=>{})
       (implicit ec:ExecutionContext):Future[T] = {
         this.synchronized {
           val f = Promise[T]
-          val newPromise = (f.asInstanceOf[Promise[Int]],msSleep,value.asInstanceOf[Int])
+          val newPromise = (f.asInstanceOf[Promise[Int]],if(!isDoneOnce) msSleep else msSleep + firstRecordDelay,value.asInstanceOf[Int])
           logger.info("dummySleeper::sleep newPromise = {}", newPromise)
           listPromises = newPromise :: listPromises
           f.future
@@ -356,6 +357,7 @@ package object oplogReader {
 
       def done():Unit = {
         this.synchronized {
+          isDoneOnce = true
           listPromises = listPromises.sortWith( (a,b) => {(a._2 < b._2 || ((a._2 == b._2) && (a._3 < b._3)))})
           val first = listPromises.head
           logger.info("testOplogDataWatcher::done {}", listPromises)
