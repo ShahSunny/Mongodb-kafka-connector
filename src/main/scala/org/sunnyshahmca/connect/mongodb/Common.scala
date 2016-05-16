@@ -14,6 +14,11 @@ package object common {
     p.future
   }
 
+  trait Sleeper {
+    def sleep[T](msSleep:Long, value:T, beforeSleepTrigger:()=>Unit, afterSleepTrigger:()=>Unit)
+    (implicit ec:ExecutionContext):Future[T]
+  }
+
   case class MaxRetriesAllowed(r:Int)
   case class DelayBetweenRetries(d:Duration)
 

@@ -35,6 +35,20 @@ package object oplogReader {
     def getAllAvailableRecords():Seq[(Long,Document)]
   }
 
+  class SleeperImpl extends Sleeper {
+    def sleep[T](msSleep:Long, value:T, beforeSleepTrigger:()=>Unit, afterSleepTrigger:()=>Unit)
+    (implicit ec:ExecutionContext):Future[T] = {
+      Future{ 
+        beforeSleepTrigger()
+        blocking { 
+          try{ Thread.sleep(msSleep)} catch { case _:Throwable => {} } 
+          afterSleepTrigger()
+          value
+        } 
+      }
+    }
+  }
+
   /* This function returns a future which need to complete in below cases
           - Successful completion
               - When we get the maxRecords
@@ -46,7 +60,7 @@ package object oplogReader {
           - allRecordsAvailable future
           - firstRecordStalenessTimeout future */
   def oplogDataWatcher(recordPooler:RecordPooler, maxWaitAllowed:Duration, maxWaitForSubsequentRecords:Duration)  
-        (implicit ec:ExecutionContext) : Future[Seq[(Long,Document)]] = {
+        (implicit ec:ExecutionContext, sl:Sleeper) : Future[Seq[(Long,Document)]] = {
 
     val requestFuture = recordPooler.request match {
       case Right((requestId:Int, f:FirstRecordFuture)) => { 
@@ -54,13 +68,12 @@ package object oplogReader {
         val allRecordsReceivedOrFirstRecordTimeOutFuture:Future[Int] = f.flatMap {
           case (firstRecordReceivedMs:Long, allRecordsReceived:Future[Int]) => {
             val firstRecordFreshnessTimeout:Long =  (firstRecordReceivedMs + maxWaitForSubsequentRecords.toMillis) - System.currentTimeMillis()
-            def firstRecordTimeOutFuture = if(firstRecordFreshnessTimeout > 0) {
-              logger.debug("oplogDataWatcher:: requestId = {} going into the timeout for {}",requestId, firstRecordFreshnessTimeout); 
-              Future{ blocking { 
-                try{Thread.sleep(firstRecordFreshnessTimeout)} catch { case _:Throwable => {} } 
-                logger.trace("oplogDataWatcher:: requestId = {} Timeout = {}", requestId, firstRecordFreshnessTimeout)
-                requestId
-              } }
+            def firstRecordTimeOutFuture:Future[Int] = if(firstRecordFreshnessTimeout > 0) {
+              sl.sleep(firstRecordFreshnessTimeout, requestId, () => {
+                  logger.debug("oplogDataWatcher:: requestId = {} going into the timeout for {}",requestId, firstRecordFreshnessTimeout);
+                },() => {
+                  logger.trace("oplogDataWatcher:: firstRecordTimeOutFuture timed out")
+              })
             } else { 
               logger.trace("oplogDataWatcher:: first record is already timedout requestId = {} Timeout = {}", requestId, firstRecordFreshnessTimeout); 
               Future.successful(requestId)
@@ -71,10 +84,9 @@ package object oplogReader {
             firstRace
           }
         }
-        def maxWaitTimeoutFuture = Future { blocking { try{Thread.sleep(maxWaitAllowed.toMillis)} catch { case _:Throwable => {} } 
-          logger.trace("maxWaitTimeoutFuture done requestId = {} maxWaitAllowed = {}", requestId, maxWaitAllowed.toMillis);
-          requestId
-        } }
+        def maxWaitTimeoutFuture = sl.sleep(maxWaitAllowed.toMillis, requestId, ()=>{}, ()=>{
+            logger.trace("maxWaitTimeoutFuture done requestId = {} maxWaitAllowed = {}", requestId, maxWaitAllowed.toMillis);
+        })
         val secondRace:Future[Int] = successRace(allRecordsReceivedOrFirstRecordTimeOutFuture, maxWaitTimeoutFuture)
         secondRace.onComplete{ case _ => logger.info("secondRace won requestId = {}", requestId) }
         secondRace
