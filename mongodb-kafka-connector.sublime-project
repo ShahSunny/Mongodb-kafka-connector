@@ -6,7 +6,8 @@
             [
                 "*.scala",
                 "*.sbt",
-                "*.md"
+                "*.md",
+                "logback.xml"
             ],
             "folder_exclude_patterns":
             [
