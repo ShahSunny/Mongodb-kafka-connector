@@ -1,7 +1,7 @@
 package org.sunnyshahmca.connect.mongodb
 package object oplogReader {
   import org.bson.BsonTimestamp
-  import scala.concurrent.{ExecutionContext, Future, Promise, blocking}
+  import scala.concurrent.{ExecutionContext, Future, Promise, blocking, Await}
   import scala.util._
   import scala.collection.immutable
   import org.mongodb.scala._
@@ -15,8 +15,9 @@ package object oplogReader {
   val logger = LoggerFactory.getLogger(this.getClass);  
 
   type RequestId = Int
-  type AllRecordsFuture = Future[Int]
-  type FirstRecordFuture = Future[(Long, AllRecordsFuture)]
+  type Milliseconds = Long
+  type AllRecordsFuture = Future[RequestId]
+  type FirstRecordFuture = Future[(Milliseconds, AllRecordsFuture)]
   type RequestIDWithFirstRecordFuture = (RequestId,FirstRecordFuture)
 
   trait OplogObserverMaster {
@@ -60,22 +61,21 @@ package object oplogReader {
           - allRecordsAvailable future
           - firstRecordStalenessTimeout future */
   def oplogDataWatcher(recordPooler:RecordPooler, maxWaitAllowed:Duration, maxWaitForSubsequentRecords:Duration)  
-        (implicit ec:ExecutionContext, sl:Sleeper) : Future[Seq[(Long,Document)]] = {
+        (implicit ec:ExecutionContext, sl:Sleeper) : Future[Seq[(Milliseconds,Document)]] = {
 
     val requestFuture = recordPooler.request match {
       case Right((requestId:Int, f:FirstRecordFuture)) => { 
         logger.info("oplogDataWatcher:: requestId = {} first record future received", requestId )
         val allRecordsReceivedOrFirstRecordTimeOutFuture:Future[Int] = f.flatMap {
-          case (firstRecordReceivedMs:Long, allRecordsReceived:Future[Int]) => {
-            val firstRecordFreshnessTimeout:Long =  (firstRecordReceivedMs + maxWaitForSubsequentRecords.toMillis) - System.currentTimeMillis()
-            def firstRecordTimeOutFuture:Future[Int] = if(firstRecordFreshnessTimeout > 0) {
-              sl.sleep(firstRecordFreshnessTimeout, requestId, () => {
-                  logger.debug("oplogDataWatcher:: requestId = {} going into the timeout for {}",requestId, firstRecordFreshnessTimeout);
+          case (firstRecordReceivedMs:Milliseconds, allRecordsReceived:Future[Int]) => {
+            def firstRecordTimeOutFuture:Future[Int] = if(maxWaitForSubsequentRecords.toMillis > 0) {
+              sl.sleep(maxWaitForSubsequentRecords.toMillis, requestId, () => {
+                  logger.debug("oplogDataWatcher:: requestId = {} going into the timeout for {}",requestId, maxWaitForSubsequentRecords.toMillis);
                 },() => {
                   logger.trace("oplogDataWatcher:: firstRecordTimeOutFuture timed out")
               })
             } else { 
-              logger.trace("oplogDataWatcher:: first record is already timedout requestId = {} Timeout = {}", requestId, firstRecordFreshnessTimeout); 
+              logger.trace("oplogDataWatcher:: first record is already timedout requestId = {} Timeout = {}", requestId, maxWaitForSubsequentRecords.toMillis); 
               Future.successful(requestId)
             }
             allRecordsReceived.onSuccess{ case _ => logger.trace("oplogDataWatcher:: allRecordsReceived onSuccess requestId = {}", requestId) }
@@ -243,8 +243,8 @@ package object oplogReader {
     def resetPromises() = {
       logger.trace("RecordPooler::resetPromises" )
       completePromises()
-      firstRecordPromise  = Promise[(Long, Future[Int])]
-      allRecordsPromise   = Promise[Int]
+      firstRecordPromise  = Promise[(Milliseconds, Future[RequestId])]
+      allRecordsPromise   = Promise[RequestId]
     }
 
     def completePromises() = {
@@ -337,4 +337,83 @@ package object oplogReader {
     implicit val observerRestartTimeout = ObserverRestartTimeout(Duration(600, SECONDS))
     implicit def actualOplogObservableFactory:(Option[BsonValue], OplogObserverMaster, MongoClient) => OplogRequester = mongodbOplogObservableFactory
   }//End of object Implicits
+
+  def testOplogDataWatcher(maxWaitAllowed:Long, maxWaitForSubsequentRecords:Long, firstRecordDelay:Long, secondRecordDelay:Long):Boolean = {
+    import ExecutionContext.Implicits.global
+
+    implicit object dummySleeper extends Sleeper {
+      var listPromises = List[(Promise[Int], Long, Int)]()
+      def sleep[T](msSleep:Long, value:T, beforeSleepTrigger:()=>Unit = ()=>{}, afterSleepTrigger:()=>Unit = ()=>{})
+      (implicit ec:ExecutionContext):Future[T] = {
+        this.synchronized {
+          val f = Promise[T]
+          val newPromise = (f.asInstanceOf[Promise[Int]],msSleep,value.asInstanceOf[Int])
+          logger.info("dummySleeper::sleep newPromise = {}", newPromise)
+          listPromises = newPromise :: listPromises
+          f.future
+        }
+      }
+
+      def done():Unit = {
+        this.synchronized {
+          listPromises = listPromises.sortWith( (a,b) => {(a._2 < b._2 || ((a._2 == b._2) && (a._3 < b._3)))})
+          val first = listPromises.head
+          logger.info("testOplogDataWatcher::done {}", listPromises)
+          listPromises = listPromises.takeRight(listPromises.size - 1)
+          first._1.success(first._3)
+        }
+      }
+    }
+
+    object recordPooler extends RecordPooler {
+      var promiseFirst = Promise[(Milliseconds, AllRecordsFuture)]
+      var secondRecordFuture:Future[RequestId] = null
+
+      def request: Either[RequestId, RequestIDWithFirstRecordFuture] = {
+        val firstRecordFuture = dummySleeper.sleep(firstRecordDelay,1:Int)
+        secondRecordFuture = dummySleeper.sleep(firstRecordDelay + secondRecordDelay,2:Int)
+        secondRecordFuture.onSuccess{case _ => {logger.info("secondRecordFuture's onSuccess got called")}}
+        promiseFirst.completeWith(firstRecordFuture.map( (requestId) => {
+          Future{ blocking{ Thread.sleep(1); dummySleeper.done() } }
+          (requestId, secondRecordFuture)
+        }))
+        return Right(3,promiseFirst.future)
+      }
+
+      def getAllAvailableRecords():Seq[(Milliseconds,Document)] = {
+        if(promiseFirst.isCompleted && secondRecordFuture.isCompleted) 
+          List((1,Document("id" -> 1)),(2, Document("id" -> 2)))
+        else if ( promiseFirst.isCompleted )
+          List((1,Document("id" -> 1)))
+        else 
+          List[(Milliseconds,Document)]()
+      }
+    }
+    
+    val maxDelayAfterFirstRecord = maxWaitAllowed - firstRecordDelay
+    val expectedCount = if(firstRecordDelay > maxWaitAllowed ) {
+      0
+    } else if ( secondRecordDelay > maxDelayAfterFirstRecord ||  secondRecordDelay > maxWaitForSubsequentRecords ) {
+      1
+    } else {
+      2
+    }
+
+    val result = oplogDataWatcher(recordPooler, Duration(maxWaitAllowed, MILLISECONDS), Duration(maxWaitForSubsequentRecords, MILLISECONDS))
+    logger.info("Calling Done, Expected count = {}", expectedCount)
+    dummySleeper.done()
+    Await.result(result, 100 millis)
+    logger.info("After Done {}", result)
+    val isSuccess = result.value.get match {
+      case Success(l) => { 
+        if(l.size == expectedCount)  { 
+          logger.info("l.size {} == expectedCount {}", l.size, expectedCount); true
+        } else { 
+          logger.info("l.size {} != expectedCount {}", l.size, expectedCount); false
+        }
+      }
+      case _ => logger.info("Failure"); false
+    }
+    isSuccess
+  }
 }

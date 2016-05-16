@@ -2,15 +2,14 @@
 
   <timestamp key="bySecond" datePattern="yyyyMMdd'T'HHmmss"/>
 
-  <appender name="FILE" class="ch.qos.logback.core.FileAppender">
-    <!-- use the previously created timestamp to create a uniquely
-         named log file -->
+
+<!--   <appender name="FILE" class="ch.qos.logback.core.FileAppender">
     <file>log-${bySecond}.txt</file>
     <encoder>
       <pattern>%d %-5level [%thread] %logger{0}: %msg%n</pattern>
        <immediateFlush>false</immediateFlush>
     </encoder>
-  </appender>
+  </appender> -->
 
   <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
     <!-- encoders are assigned the type
@@ -20,8 +19,8 @@
     </encoder>
   </appender>
 
-  <root level="DEBUG">
+  <root level="TRACE">
     <appender-ref ref="STDOUT" />
-    <appender-ref ref="FILE" />
+    <!-- <appender-ref ref="FILE" /> -->
   </root>
 </configuration>
