@@ -1,21 +1,17 @@
 package org.sunnyshahmca.connect.mongodb.OplogReader
-import org.specs2._
-import org.scalacheck.{Gen,Properties,Prop}
-import scala.concurrent.ExecutionContext
-import ExecutionContext.Implicits.global
-import org.scalacheck.Gen.{listOf, alphaStr, numChar}
-import scala.concurrent.ExecutionContext.Implicits.global
-import org.sunnyshahmca.connect.mongodb.oplogReader
-import org.sunnyshahmca.connect.mongodb.common._
 
+import scala.concurrent.duration._
 import scala.concurrent.{ExecutionContext, Future, Promise, blocking, Await}
 import scala.util._
-import scala.collection.immutable
-import org.mongodb.scala._
-import scala.concurrent.duration._
-import org.slf4j.{Logger,LoggerFactory}
+import org.specs2._
+import org.scalacheck.{Gen,Properties,Prop}
 import org.scalacheck.Arbitrary.arbitrary
-import org.scalacheck.Gen.{choose, frequency}
+import org.scalacheck.Gen.{choose, frequency,listOf, alphaStr, numChar}
+import org.slf4j.{Logger,LoggerFactory}
+import org.sunnyshahmca.connect.mongodb.common._
+import org.mongodb.scala._
+
+import scala.concurrent.ExecutionContext.Implicits.global
 
 object OplogDataWatcherChecker extends mutable.Specification with org.specs2.ScalaCheck
 {
@@ -29,19 +25,28 @@ object OplogDataWatcherChecker extends mutable.Specification with org.specs2.Sca
     (1, 1)
   )
   val logger = LoggerFactory.getLogger(this.getClass);  
-  "CheckOplogDataWatcher" >> Prop.forAll(maxWaitGen,maxWaitGen,numberGen,numberGen) { 
-    (maxWaitAllowed:Int, maxWaitForSubsequentRecords:Int, firstRecordDelay:Int, secondRecordDelay:Int) =>   {
-      val maxDelayAfterFirstRecord = maxWaitAllowed - firstRecordDelay
-      val expectedCount = if(firstRecordDelay > maxWaitAllowed ) 0  
-        else if ( secondRecordDelay > maxDelayAfterFirstRecord ||  secondRecordDelay > maxWaitForSubsequentRecords ) 1
-        else 2
 
-      val result = testOplogDataWatcher(maxWaitAllowed, maxWaitForSubsequentRecords, firstRecordDelay, secondRecordDelay)
-      result must_== expectedCount
-    }
+  "Validate CheckOplogDataWatcher for not all data beforehand with reference impllimentation" >> 
+  Prop.forAll(maxWaitGen,maxWaitGen,numberGen,numberGen) {
+      (maxWaitAllowed:Int, maxWaitForSubsequentRecords:Int, firstRecordDelay:Int, secondRecordDelay:Int) => {
+        val maxDelayAfterFirstRecord = maxWaitAllowed - firstRecordDelay
+        val expectedCount = if(firstRecordDelay > maxWaitAllowed ) 0  
+          else if ( secondRecordDelay > maxDelayAfterFirstRecord ||  secondRecordDelay > maxWaitForSubsequentRecords ) 1
+          else 2
+
+        val result = testOplogDataWatcher(maxWaitAllowed, maxWaitForSubsequentRecords, firstRecordDelay, secondRecordDelay)
+        result must_== expectedCount
+      }
   }
 
-  def testOplogDataWatcher(maxWaitAllowed:Long, maxWaitForSubsequentRecords:Long, firstRecordDelay:Long, secondRecordDelay:Long):Int = {
+  "Validate CheckOplogDataWatcher for all data available beforehand" >>  {
+      val result = testOplogDataWatcher(maxWaitGen.sample.get, maxWaitGen.sample.get, 
+                          numberGen.sample.get, numberGen.sample.get,true)
+      result must_== 2
+  }
+
+  def testOplogDataWatcher(maxWaitAllowed:Long, maxWaitForSubsequentRecords:Long, firstRecordDelay:Long, secondRecordDelay:Long, 
+    isAllDataAvailable:Boolean = false):Int = {
 
     implicit object dummySleeper extends Sleeper {
       var listPromises = List[(Promise[Int], Long, Int)]()
@@ -74,18 +79,22 @@ object OplogDataWatcherChecker extends mutable.Specification with org.specs2.Sca
       var secondRecordFuture:Future[oplogReader.RequestId] = null
 
       def request: Either[oplogReader.RequestId, oplogReader.RequestIDWithFirstRecordFuture] = {
-        val firstRecordFuture = dummySleeper.sleep(firstRecordDelay,1:Int)
-        secondRecordFuture = dummySleeper.sleep(firstRecordDelay + secondRecordDelay,2:Int)
-        secondRecordFuture.onSuccess{case _ => {logger.info("secondRecordFuture's onSuccess got called")}}
-        promiseFirst.completeWith(firstRecordFuture.map( (requestId) => {
-          Future{ blocking{ Thread.sleep(1); dummySleeper.done() } }
-          (requestId, secondRecordFuture)
-          }))
-        return Right(3,promiseFirst.future)
+        if(isAllDataAvailable) {
+          Left(3)
+        } else {
+          val firstRecordFuture = dummySleeper.sleep(firstRecordDelay,1:Int)
+          secondRecordFuture = dummySleeper.sleep(firstRecordDelay + secondRecordDelay,2:Int)
+          secondRecordFuture.onSuccess{case _ => {logger.info("secondRecordFuture's onSuccess got called")}}
+          promiseFirst.completeWith(firstRecordFuture.map( (requestId) => {
+            Future{ blocking{ Thread.sleep(1); dummySleeper.done() } }
+            (requestId, secondRecordFuture)
+            }))
+          return Right(3,promiseFirst.future)
+        }
       }
 
       def getAllAvailableRecords():Seq[(oplogReader.Milliseconds,Document)] = {
-        if(promiseFirst.isCompleted && secondRecordFuture.isCompleted) 
+        if((promiseFirst.isCompleted && secondRecordFuture.isCompleted) || isAllDataAvailable)
         List((1,Document("id" -> 1)),(2, Document("id" -> 2)))
         else if ( promiseFirst.isCompleted )
         List((1,Document("id" -> 1)))
@@ -95,7 +104,7 @@ object OplogDataWatcherChecker extends mutable.Specification with org.specs2.Sca
     }
 
     val result = oplogReader.oplogDataWatcher(recordPooler, Duration(maxWaitAllowed, MILLISECONDS), Duration(maxWaitForSubsequentRecords, MILLISECONDS))
-    dummySleeper.done()
+    if(!isAllDataAvailable) { dummySleeper.done() }
     Await.result(result, 100 millis)
     logger.info("After Done {}", result)
     result.value.get match {
