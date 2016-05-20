@@ -1,4 +1,4 @@
-package org.sunnyshahmca.connect.mongodb.OplogReader
+import org.sunnyshahmca.connect.mongodb.oplogReader
 
 import scala.concurrent.duration._
 import scala.concurrent.{ExecutionContext, Future, Promise, blocking, Await}
@@ -10,7 +10,7 @@ import org.scalacheck.Gen.{choose, frequency,listOf, alphaStr, numChar}
 import org.slf4j.{Logger,LoggerFactory}
 import org.sunnyshahmca.connect.mongodb.common._
 import org.mongodb.scala._
-
+import java.util.concurrent.Executors
 import scala.concurrent.ExecutionContext.Implicits.global
 
 object OplogDataWatcherChecker extends mutable.Specification with org.specs2.ScalaCheck
@@ -47,7 +47,6 @@ object OplogDataWatcherChecker extends mutable.Specification with org.specs2.Sca
 
   def testOplogDataWatcher(maxWaitAllowed:Long, maxWaitForSubsequentRecords:Long, firstRecordDelay:Long, secondRecordDelay:Long, 
     isAllDataAvailable:Boolean = false):Int = {
-
     implicit object dummySleeper extends Sleeper {
       var listPromises = List[(Promise[Int], Long, Int)]()
       var isDoneOnce = false
@@ -55,7 +54,9 @@ object OplogDataWatcherChecker extends mutable.Specification with org.specs2.Sca
       (implicit ec:ExecutionContext):Future[T] = {
         this.synchronized {
           val f = Promise[T]
-          val newPromise = (f.asInstanceOf[Promise[Int]],if(!isDoneOnce) msSleep else msSleep + firstRecordDelay,value.asInstanceOf[Int])
+          val newSleepTime  = if(!isDoneOnce) msSleep else msSleep + firstRecordDelay
+          val newPromise = (f.asInstanceOf[Promise[Int]], newSleepTime , value.asInstanceOf[Int])
+          if(isDoneOnce) { Future{ dummySleeper.done() } }
           logger.info("dummySleeper::sleep newPromise = {}", newPromise)
           listPromises = newPromise :: listPromises
           f.future
@@ -86,7 +87,6 @@ object OplogDataWatcherChecker extends mutable.Specification with org.specs2.Sca
           secondRecordFuture = dummySleeper.sleep(firstRecordDelay + secondRecordDelay,2:Int)
           secondRecordFuture.onSuccess{case _ => {logger.info("secondRecordFuture's onSuccess got called")}}
           promiseFirst.completeWith(firstRecordFuture.map( (requestId) => {
-            Future{ blocking{ Thread.sleep(1); dummySleeper.done() } }
             (requestId, secondRecordFuture)
             }))
           return Right(3,promiseFirst.future)
@@ -105,7 +105,7 @@ object OplogDataWatcherChecker extends mutable.Specification with org.specs2.Sca
 
     val result = oplogReader.oplogDataWatcher(recordPooler, Duration(maxWaitAllowed, MILLISECONDS), Duration(maxWaitForSubsequentRecords, MILLISECONDS))
     if(!isAllDataAvailable) { dummySleeper.done() }
-    Await.result(result, 100 millis)
+    Await.result(result, 1000 millis)
     logger.info("After Done {}", result)
     result.value.get match {
       case Success(l) =>  l.size 
