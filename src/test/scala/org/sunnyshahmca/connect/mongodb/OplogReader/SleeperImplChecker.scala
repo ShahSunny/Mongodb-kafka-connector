@@ -1,5 +1,4 @@
 import org.sunnyshahmca.connect.mongodb.oplogReader
-
 import scala.concurrent.duration._
 import scala.concurrent.{ExecutionContext, Future, Promise, blocking, Await}
 import scala.util._

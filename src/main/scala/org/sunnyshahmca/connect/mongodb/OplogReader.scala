@@ -42,7 +42,7 @@ package object oplogReader {
       Future{ 
         beforeSleepTrigger()
         blocking { 
-          try{ Thread.sleep(msSleep)} catch { case _:Throwable => {} } 
+          if(msSleep > 0) { try{ Thread.sleep(msSleep)} catch { case _:Throwable => {} } }
           afterSleepTrigger()
           value
         } 
@@ -185,7 +185,8 @@ package object oplogReader {
   class RecordPoolerImpl(lastOplogRecordTimeStamp:Option[BsonValue], maxRecords:Int)
   (implicit oplogObservableFactory:(Option[BsonValue], OplogObserverMaster, MongoClient) => OplogRequester,
    observerRestartTimeout:ObserverRestartTimeout,
-   mongoClient:MongoClient) 
+   mongoClient:MongoClient,
+   currentTimeMillis:()=>Long) 
   extends OplogObserverMaster with RecordPooler {
     val noOp                    = new BsonString("n")
 
@@ -194,7 +195,7 @@ package object oplogReader {
     var m_oplogObserver         = createObserver
     var firstRecordPromise      = Promise[(Long, Future[RequestId])]
     var allRecordsPromise       = Promise[RequestId]
-    var lastRecordReceivedAt    = System.currentTimeMillis
+    var lastRecordReceivedAt    = currentTimeMillis()
 
     var requestId:Int = 0
     val logger = LoggerFactory.getLogger(this.getClass) 
@@ -231,7 +232,7 @@ package object oplogReader {
     }
 
     def recreateObserverIfNeeded = {
-      val currentTime = System.currentTimeMillis
+      val currentTime = currentTimeMillis()
       if(currentTime - lastRecordReceivedAt > observerRestartTimeout.d.toMillis) {
         logger.warn("RecordPooler::recreateObserverIfNeeded observer stale since  {}  Timeout = {}", (currentTime - lastRecordReceivedAt), observerRestartTimeout.d.toMillis )
         recreateObserver
@@ -286,7 +287,7 @@ package object oplogReader {
       } else {
         this.synchronized {
           curOplogRecordTimeStamp = Some(doc("ts"))
-          lastRecordReceivedAt = System.currentTimeMillis()
+          lastRecordReceivedAt = currentTimeMillis()
           if(doc("op") != noOp) {
             queueRecords = queueRecords :+ (lastRecordReceivedAt, doc)
             logger.debug("RecordPooler::onNextDoc doc is not noOp, Queue size = {}", queueRecords.size)
