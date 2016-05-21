@@ -182,24 +182,21 @@ package object oplogReader {
   //It need to pull the data from the cluster and put it into the threadSafeQueue
   case class ObserverRestartTimeout(d:Duration)
 
-  class RecordPoolerImpl(lastOplogRecordTimeStamp:Option[BsonValue], maxRecords:Int)
-  (implicit oplogObservableFactory:(Option[BsonValue], OplogObserverMaster, MongoClient) => OplogRequester,
-   observerRestartTimeout:ObserverRestartTimeout,
-   mongoClient:MongoClient,
-   currentTimeMillis:()=>Long) 
+  class RecordPoolerImpl(lastOplogRecordTimeStamp:Option[BsonValue], maxRecords:Int, 
+      oplogObserverCreator:OplogObserverCreator)
+  (implicit currentTimeMillis:()=>Long)
   extends OplogObserverMaster with RecordPooler {
     val noOp                    = new BsonString("n")
+    val logger = LoggerFactory.getLogger(this.getClass)
 
     var curOplogRecordTimeStamp = lastOplogRecordTimeStamp
     var queueRecords            = createBlankQueue
-    var m_oplogObserver         = createObserver
+    var m_oplogObserver         = oplogObserverCreator.create(curOplogRecordTimeStamp, this)
     var firstRecordPromise      = Promise[(Long, Future[RequestId])]
     var allRecordsPromise       = Promise[RequestId]
     var lastRecordReceivedAt    = currentTimeMillis()
-
     var requestId:Int = 0
-    val logger = LoggerFactory.getLogger(this.getClass) 
-
+    
     def createBlankQueue = immutable.Queue[(Long, Document)]()
     def request: Either[RequestId, RequestIDWithFirstRecordFuture] = {
       requestId = requestId + 1
@@ -214,7 +211,9 @@ package object oplogReader {
             logger.debug("RecordPooler::request queueRecords.size >= 1 Calling success of firstRecord Promise")
             sendSuccessForFirstRecordPromise 
           }
-          recreateObserverIfNeeded
+          m_oplogObserver = oplogObserverCreator.recreateIfNeeded(
+                              lastRecordReceivedAt, curOplogRecordTimeStamp, 
+                              this, m_oplogObserver)
           Right((requestId,firstRecordPromise.future))
         }
       }
@@ -222,23 +221,13 @@ package object oplogReader {
 
     def sendSuccessForFirstRecordPromise =  {
       val firstRecordPromiseResult = (queueRecords.front._1, allRecordsPromise.future)
-      logger.trace("RecordPooler::sendSuccessForFirstRecordPromise firstRecordPromiseResult = {}", firstRecordPromiseResult)
+      logger.trace("RecordPooler::sendSuccessForFirstRecordPromise firstRecordPromiseResult = {} requestId {}", firstRecordPromiseResult, requestId)
       firstRecordPromise.trySuccess(firstRecordPromiseResult)
     }
 
     def sendSuccessForAllRecordsPromise = {
       logger.trace("RecordPooler::sendSuccessForAllRecordsPromise ")
       allRecordsPromise.trySuccess(requestId)
-    }
-
-    def recreateObserverIfNeeded = {
-      val currentTime = currentTimeMillis()
-      if(currentTime - lastRecordReceivedAt > observerRestartTimeout.d.toMillis) {
-        logger.warn("RecordPooler::recreateObserverIfNeeded observer stale since  {}  Timeout = {}", (currentTime - lastRecordReceivedAt), observerRestartTimeout.d.toMillis )
-        recreateObserver
-      } else {
-        logger.trace("RecordPooler::recreateObserverIfNeeded observer is active  " + (currentTime - lastRecordReceivedAt) + " Timeout = " + observerRestartTimeout.d.toMillis )
-      }
     }
 
     def resetPromises() = {
@@ -269,17 +258,18 @@ package object oplogReader {
       }
     }
 
-    def createObserver = {
-      logger.trace("RecordPooler::createObserver")
-      oplogObservableFactory(curOplogRecordTimeStamp, this, mongoClient)
+    def onError(e:Throwable) = { 
+      logger.error("RecordPooler::onError {}", e);
+      this.synchronized { 
+        m_oplogObserver = oplogObserverCreator.recreate(curOplogRecordTimeStamp, 
+                                                                  this, m_oplogObserver)
+      } 
     }
-
-    def recreateObserver = { 
-      logger.trace("RecordPooler::recreateObserver")
-      m_oplogObserver.disable; m_oplogObserver = createObserver 
+    
+    def requestRecords = { 
+      logger.trace("RecordPooler::requestRecords"); 
+      m_oplogObserver.requestRecords(onSubscriptionOver) 
     }
-    def onError(e:Throwable) = { logger.error("RecordPooler::onError {}", e); this.synchronized { recreateObserver } }
-    def requestRecords = { logger.trace("RecordPooler::requestRecords"); m_oplogObserver.requestRecords(onSubscriptionOver) }
 
     def onNextDoc(doc:Document) = {
       if (queueRecords.size == maxRecords) {
@@ -299,7 +289,7 @@ package object oplogReader {
               sendSuccessForFirstRecordPromise
             }
           } else {
-              logger.trace("RecordPooler::onNextDoc doc is noOp, Queue size = {}", queueRecords.size)
+            logger.trace("RecordPooler::onNextDoc doc is noOp, Queue size = {}", queueRecords.size)
           }
         }//synchronized end
       }
@@ -312,30 +302,61 @@ package object oplogReader {
     }
   }
   
+  //All pure functions, Easy to test. ;-)
+  trait OplogObserverCreator {
+    def create(lastRecord:Option[BsonValue], observerMaster:OplogObserverMaster): OplogRequester
+    def recreateIfNeeded(lastRecordReceivedAt:Long, lastRecord:Option[BsonValue], 
+      observerMaster:OplogObserverMaster, currentOplogRequester:OplogRequester): OplogRequester
+    def recreate(lastRecord:Option[BsonValue],  observerMaster:OplogObserverMaster,
+                           currentOplogRequester:OplogRequester):OplogRequester
+  }  
 
-  def mongodbOplogObservableFactory(lastRecord:Option[BsonValue], observerMaster:OplogObserverMaster, mongoClient:MongoClient): OplogRequester = {
-    val database: MongoDatabase = mongoClient.getDatabase("local")
-    val collection: MongoCollection[Document] = database.getCollection("oplog.rs") 
-    val filterDocument = Document("op" -> Document("$ne" -> "n"))
-    val unFilteredCollectionRecords = collection.find(filterDocument).cursorType(CursorType.TailableAwait)
-    val collectRecords = lastRecord match {
-      case Some(lr:BsonValue) => {
-        logger.info("actualOplogObservableFactory lastRecord = {}", lr)
-        unFilteredCollectionRecords.filter(Document("ts" -> Document("$gt" -> lr))) 
+  class MongodbOplogObserverCreator(mongoClient:MongoClient, observerRestartTimeout:ObserverRestartTimeout)
+    ( implicit currentTimeMillis:()=>Long ) extends OplogObserverCreator {
+    
+    val logger = LoggerFactory.getLogger(this.getClass) 
+
+    def create(lastRecord:Option[BsonValue], observerMaster:OplogObserverMaster): OplogRequester = {
+      val database: MongoDatabase = mongoClient.getDatabase("local")
+      val collection: MongoCollection[Document] = database.getCollection("oplog.rs") 
+      val filterDocument = Document("op" -> Document("$ne" -> "n"))
+      val unFilteredCollectionRecords = collection.find(filterDocument).cursorType(CursorType.TailableAwait)
+      val collectRecords = lastRecord match {
+        case Some(lr:BsonValue) => {
+          logger.info("actualOplogObservableFactory lastRecord = {}", lr)
+          unFilteredCollectionRecords.filter(Document("ts" -> Document("$gt" -> lr))) 
+        }
+        case None => {
+          logger.error("actualOplogObservableFactory No lastRecord = " )
+          unFilteredCollectionRecords
+        } 
       }
-      case None => {
-        logger.error("actualOplogObservableFactory No lastRecord = " )
-        unFilteredCollectionRecords
-      } 
+      logger.trace("actualOplogObservableFactory observerMaster's remaining are ", observerMaster.onSubscriptionOver) 
+      val oplogObserver = new OplogObserver(observerMaster)
+      collectRecords.subscribe(oplogObserver)
+      oplogObserver
     }
-    logger.trace("actualOplogObservableFactory observerMaster's remaining are ", observerMaster.onSubscriptionOver) 
-    val oplogObserver = new OplogObserver(observerMaster)
-    collectRecords.subscribe(oplogObserver)
-    oplogObserver
+    
+    def recreate(lastRecord:Option[BsonValue],  observerMaster:OplogObserverMaster,
+                           currentOplogRequester:OplogRequester):OplogRequester = {
+      currentOplogRequester.disable;
+      create(lastRecord, observerMaster)
+    }
+
+    def recreateIfNeeded(lastRecordReceivedAt:Long, lastRecord:Option[BsonValue], 
+      observerMaster:OplogObserverMaster, currentOplogRequester:OplogRequester): OplogRequester = {
+      if(currentTimeMillis() - lastRecordReceivedAt > observerRestartTimeout.d.toMillis) {
+        logger.warn("RecordPooler::recreateObserverIfNeeded observer stale since  {}  Timeout = {}", 
+                      (currentTimeMillis() - lastRecordReceivedAt), observerRestartTimeout.d.toMillis )
+        recreate(lastRecord, observerMaster, currentOplogRequester)
+      } else {
+        logger.trace("RecordPooler::recreateObserverIfNeeded observer is active = {} Timeout = {}", (currentTimeMillis() - lastRecordReceivedAt), observerRestartTimeout.d.toMillis )
+        currentOplogRequester
+      }
+    }
   }
 
   object Implicits {
     implicit val observerRestartTimeout = ObserverRestartTimeout(Duration(600, SECONDS))
-    implicit def actualOplogObservableFactory:(Option[BsonValue], OplogObserverMaster, MongoClient) => OplogRequester = mongodbOplogObservableFactory
   }//End of object Implicits
 }

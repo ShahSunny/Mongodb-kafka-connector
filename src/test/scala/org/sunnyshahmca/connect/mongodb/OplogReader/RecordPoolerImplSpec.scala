@@ -18,17 +18,30 @@ object RecordPoolerImplSpec extends mutable.Specification
 {
   val logger = LoggerFactory.getLogger(this.getClass)
   "RecordPoolerImpl" should { 
-    "request oplogMaster.onSubscriptionOver records at the subscription time" >> {
-      val oplogMaster = mock[oplogReader.OplogObserverMaster]
-      val subscription = mock[Subscription]
-      val recordsToRequest = 10:Int
-      val oplogObserver = new oplogReader.OplogObserver(oplogMaster)
-      inSequence {
-        (oplogMaster.onSubscriptionOver _).expects().returning(recordsToRequest)
-        (subscription.request _).expects(recordsToRequest)
-      }
-      oplogObserver.onSubscribe(subscription)
-      true
+    "return incomplete future when no records are available when request() is invoked" >> { true }
+    "return future with completed first record future" + 
+      "when first record is available when request() is invoked" >> { true }
+    "return future with completed all records future when" + 
+      "maxRecords records are already available when request() is invoked" >> { true }
+    "Complete first record future when it receives first record" >> { true }
+    "Complete first record and all records future when it receives all the records" >> { true }
+    "Complete first record and all records futures with error" + 
+      "when it has no records and getAllAvailableRecords is invoked" >> { true }
+    "Complete all records future when it has only one record" + 
+      "and getAllAvailableRecords is invoked" >> { true }
+    "Complete all records future when it has only one record" + 
+      "and getAllAvailableRecords is invoked" >> { true }
+    "requestRecords from observer when getAllAvailableRecords is invoked" + 
+      "and queueSize = maxRecords" >> { true }
+    
+    "Invoke OplogObserverCreator::recreateObserverIfNeeded when request() is invoked " >> { 
+      //Check that the lastOplogRecordTimestamp and lastRecordReceivedTime is accurate
+      true 
+    }
+    
+    "Invoke OplogObserverCreator::recreateObserver when onError() is invoked " >> { 
+      //Check that the lastOplogRecordTimestamp and lastRecordReceivedTime is accurate
+      true 
     }
   }
 }
