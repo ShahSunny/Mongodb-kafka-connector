@@ -13,22 +13,21 @@ import org.mongodb.scala._
 import scala.concurrent.ExecutionContext.Implicits.global
 
 object SleepImplChecker extends mutable.Specification 
-  with org.specs2.ScalaCheck with org.scalamock.specs2.IsolatedMockFactory
+  with org.specs2.mock.Mockito
 {
+  trait FunctionsTemp { def before():Unit; def after():Unit }
   val logger = LoggerFactory.getLogger(this.getClass);
   "SleeperImpl" should { 
     "Call before and after callbacks" >>  {
-      val mockedBeforeCallback = mockFunction[Unit]
-      val mockedAfterCallback = mockFunction[Unit]
-      inSequence {
-        mockedBeforeCallback expects ()
-        mockedAfterCallback expects ()
-      }
+      val mockFunctionsInterface = mock[FunctionsTemp]
       val sleeper = new oplogReader.SleeperImpl
       val sleepDurationMs:Long = 1
       val requestId = 2
-      val result = sleeper.sleep(sleepDurationMs, requestId, mockedBeforeCallback, mockedAfterCallback)
+      val result = sleeper.sleep(sleepDurationMs, requestId, 
+                    mockFunctionsInterface.before, mockFunctionsInterface.after)
       Await.result(result, 1000 millis)
+      there was one(mockFunctionsInterface).before() andThen
+                one(mockFunctionsInterface).after()
       result.value.get.get must_== requestId
     }
   }

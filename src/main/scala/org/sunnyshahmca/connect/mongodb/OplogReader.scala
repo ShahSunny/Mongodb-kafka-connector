@@ -36,6 +36,15 @@ package object oplogReader {
     def getAllAvailableRecords():Seq[(Long,Document)]
   }
 
+  //All pure functions, Easy to test. ;-)
+  trait OplogObserverCreator {
+    def create(lastRecord:Option[BsonValue], observerMaster:OplogObserverMaster): OplogRequester
+    def recreateIfNeeded(lastRecordReceivedAt:Long, lastRecord:Option[BsonValue], 
+      observerMaster:OplogObserverMaster, currentOplogRequester:OplogRequester): OplogRequester
+    def recreate(lastRecord:Option[BsonValue],  observerMaster:OplogObserverMaster,
+                           currentOplogRequester:OplogRequester):OplogRequester
+  }
+
   class SleeperImpl extends Sleeper {
     def sleep[T](msSleep:Long, value:T, beforeSleepTrigger:()=>Unit, afterSleepTrigger:()=>Unit)
     (implicit ec:ExecutionContext):Future[T] = {
@@ -301,15 +310,6 @@ package object oplogReader {
       recordsToRequest
     }
   }
-  
-  //All pure functions, Easy to test. ;-)
-  trait OplogObserverCreator {
-    def create(lastRecord:Option[BsonValue], observerMaster:OplogObserverMaster): OplogRequester
-    def recreateIfNeeded(lastRecordReceivedAt:Long, lastRecord:Option[BsonValue], 
-      observerMaster:OplogObserverMaster, currentOplogRequester:OplogRequester): OplogRequester
-    def recreate(lastRecord:Option[BsonValue],  observerMaster:OplogObserverMaster,
-                           currentOplogRequester:OplogRequester):OplogRequester
-  }  
 
   class MongodbOplogObserverCreator(mongoClient:MongoClient, observerRestartTimeout:ObserverRestartTimeout)
     ( implicit currentTimeMillis:()=>Long ) extends OplogObserverCreator {
@@ -355,8 +355,4 @@ package object oplogReader {
       }
     }
   }
-
-  object Implicits {
-    implicit val observerRestartTimeout = ObserverRestartTimeout(Duration(600, SECONDS))
-  }//End of object Implicits
 }
