@@ -311,6 +311,7 @@ package object oplogReader {
     }
   }
 
+  //TODO unit test this class, Mongodb scala driver is not designed to be testable.
   class MongodbOplogObserverCreator(mongoClient:MongoClient, observerRestartTimeout:ObserverRestartTimeout)
     ( implicit currentTimeMillis:()=>Long ) extends OplogObserverCreator {
     
