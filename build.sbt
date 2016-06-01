@@ -7,7 +7,8 @@ libraryDependencies ++= Seq (
     "org.scalacheck" %% "scalacheck" % "1.13.1" % "test",
     "org.specs2" %% "specs2-scalacheck" % "3.8.2" % "test",
     "org.specs2" %% "specs2-core" % "3.8.2" % "test",
-    "org.specs2" %% "specs2-mock" % "3.8.2" % "test"
+    "org.specs2" %% "specs2-mock" % "3.8.2" % "test",
+    "com.whisk" %% "docker-testkit-specs2" % "0.8.1" % "test"
 )
 
 //libraryDependencies += "org.scalatest" % "scalatest_2.10" % "2.0" % "test"
