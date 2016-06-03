@@ -27,19 +27,18 @@ package object collectionReader {
     }
   }
 
-  def addMinMaxCap(collectRecords:FindObservable[Document], 
+  def addMinMaxCap(collectionRecords:FindObservable[Document], 
                 startValuefor_Id:Option[BsonValue], maxValuefor_Id:BsonValue) = {
-    val maxValueDoc = Document( "$max" -> Document("_id" -> maxValuefor_Id), "$hint" -> Document("_id" -> 1 ))
-    val collectionWithMaxCap = collectRecords.modifiers(maxValueDoc)
-    startValuefor_Id match {
+   startValuefor_Id match {
       case Some(v) => {
-        val minCap = Document("$min" -> Document("_id" -> v ))
-        logger.debug("CollectionReader::addMinMaxCap Added min cap {}", minCap)
-        collectionWithMaxCap.modifiers(minCap)
+        val minMaxCap = Document("$min" -> Document("_id" -> v ),"$max" -> Document("_id" -> maxValuefor_Id), "$hint" -> Document("_id" -> 1 ))
+        logger.debug("CollectionReader::addMinMaxCap Added min cap {}", minMaxCap)
+        collectionRecords.modifiers(minMaxCap)
       } 
       case None => {
         logger.debug("CollectionReader::addMinMaxCap No min cap to add")
-        collectionWithMaxCap
+        val maxValueDoc = Document( "$max" -> Document("_id" -> maxValuefor_Id), "$hint" -> Document("_id" -> 1 ))
+        collectionRecords.modifiers(maxValueDoc)
       }
     }
   }
@@ -57,22 +56,20 @@ package object collectionReader {
                           maxTime(timeout.d)
     val collectionRecordsWithMin = addMinMaxCap(collectRecords, startValuefor_Id, maxValuefor_Id)
     collectRecords.toFuture.map(extractNewMin(_,maxRecordsRequired)).flatMap( _ match {
-        case (records, None) => {
-          logger.trace("CollectionReader::extractRecords Now trying to fetch the max record ( last record ) : {}", maxValuefor_Id)
-          collection.find(Document("_id" -> maxValuefor_Id)).maxTime(timeout.d).toFuture.map {
-            case maxValueRecord:Seq[Document] if maxValueRecord.size > 0 => {
-              logger.info("CollectionReader::extractRecords Found the last record! : ", maxValueRecord)
-              (records ++ maxValueRecord, None)
-            }
-            case _ => {
-              logger.warn("CollectionReader::extractRecords Looks like the max record is not available with the server! : {}", maxValuefor_Id)
-              (records, None)
-            }
+      case (records, None) => {
+        logger.trace("CollectionReader::extractRecords Now trying to fetch the max record ( last record ) : {}", maxValuefor_Id)
+        collection.find(Document("_id" -> maxValuefor_Id)).maxTime(timeout.d).toFuture.map {
+          case maxValueRecord:Seq[Document] if maxValueRecord.size > 0 => {
+            (records ++ maxValueRecord, None)
+          }
+          case _ => {
+            logger.warn("CollectionReader::extractRecords Looks like the max record is not available with the server! : {}", maxValuefor_Id)
+            (records, None)
           }
         }
-        case (r) => Future.successful(r)
       }
-    )
+      case (r) => Future.successful(r)
+    })
   }
 
   def findMaxIDValue(collection:MongoCollection[Document]):Future[Option[BsonValue]] = {
@@ -81,50 +78,11 @@ package object collectionReader {
         val maxId = records.last.get("_id")
         logger.info("CollectionReader::findMaxIDValue found the max _id {}", maxId)
         maxId
-      }
-      else {
+      } else {
         logger.error("CollectionReader::findMaxIDValue couldn't find the max _id ")
         None
       }
     }
   }
-
-  def readRecords(collection:MongoCollection[Document], maxValue:BsonValue, startValuefor_Id:Option[BsonValue], recordCount:Int = 0)
-              (implicit maxRetriesAllowed:MaxRetriesAllowed, delayBetweenRetries:DelayBetweenRetries,
-                maxRecords:MaxNoOfRecordsToExtract, timeout:MaxServerCursorTimeOut):
-              Future[(Seq[Document],Option[BsonValue])] = {
-    
-    var newRecordCount = recordCount
-    OpRetrier(() => extractRecords(collection,maxValue,startValuefor_Id)).flatMap { 
-      case (records,Some(newMinValue)) => {
-        for(record <- records) { 
-          logger.info("{} ==> {}", newRecordCount, record); 
-          newRecordCount = newRecordCount + 1 
-        } 
-        readRecords(collection, maxValue, Some(newMinValue), newRecordCount)
-
-      }
-      case (records,None) => { 
-        for(record <- records) { 
-          logger.info("{} ==> {}",newRecordCount,record); 
-          newRecordCount = newRecordCount + 1 
-        } 
-        Future.successful(Nil, None)
-      }
-    }
-  }
-
-  def printAllRecords(mongoClient: MongoClient,dbName:String, colllectionName:String ) = {
-    val database: MongoDatabase = mongoClient.getDatabase(dbName)
-    val collection: MongoCollection[Document] = database.getCollection(colllectionName)  
-    implicit val timeout = MaxServerCursorTimeOut(Duration(1,MINUTES))
-    implicit val maxRecords = MaxNoOfRecordsToExtract(32)
-    import common.OpRetrierImplicits._
-
-    val finalResult = findMaxIDValue(collection).flatMap{ 
-      case Some(maxValue) => readRecords(collection, maxValue, None)
-      case None => Future.failed(throw new NoMaxValueFound)
-    }
-    finalResult
-  }
 }
+
