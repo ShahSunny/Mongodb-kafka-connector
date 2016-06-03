@@ -12,7 +12,7 @@ import scala.util.{Try, Success, Failure}
 import scala.concurrent.duration._
 import org.mongodb.scala._
 import org.sunnyshahmca.connect.mongodb._
-import org.mongodb.scala.bson.{BsonObjectId,BsonValue}
+import org.mongodb.scala.bson.{BsonObjectId,BsonValue,BsonInt32}
 import org.sunnyshahmca.connect.mongodb.collectionReader._
 import org.sunnyshahmca.connect.mongodb.common._
 
@@ -72,7 +72,46 @@ object CollectionReaderHelper {
 
 		val allRecords = findMaxIDValue(collection).flatMap{ 
 			case Some(maxValue) => readRecords(collection, maxValue, None)
-			case None => Future.failed(throw new NoMaxValueFound)
+			case None => Future { Seq.empty[Document] }
+		}
+		Await.ready(allRecords,Duration(60, SECONDS))
+		allRecords.value.get.get
+  }
+ 
+  def readRecordsInSteps(collection:MongoCollection[Document], maxValue:BsonValue, startValuefor_Id:Option[BsonValue])
+              (implicit maxRetriesAllowed:MaxRetriesAllowed, delayBetweenRetries:DelayBetweenRetries,
+                maxRecords:MaxNoOfRecordsToExtract, timeout:MaxServerCursorTimeOut): Future[Seq[Document]] = {
+    
+    OpRetrier(() => extractRecords(collection,maxValue,startValuefor_Id)).map { 
+			case (records,Some(newMinValue)) => {
+			  val additionalRecords = readRecordsInSteps(collection, maxValue,Some(newMinValue))
+        Await.ready(additionalRecords, Duration(60,SECONDS))
+        records ++ additionalRecords.value.get.get
+			}
+      case (records,None) => records 
+    }
+  }
+
+
+  def readAllRecordsInSteps(mongoClient:MongoClient, steps:Int, deleteFrom:Option[Document] = None)
+	  (implicit colName:CollectionName, dbName:DatabaseName):Seq[Document] = {
+		val database: MongoDatabase = mongoClient.getDatabase(dbName.d)
+		val collection: MongoCollection[Document] = database.getCollection(colName.d)  
+		implicit val timeout = MaxServerCursorTimeOut(Duration(1,MINUTES))
+		implicit val maxRecords = MaxNoOfRecordsToExtract(steps)
+		import common.OpRetrierImplicits._
+
+		val allRecords = findMaxIDValue(collection).flatMap{ 
+			case Some(maxValue) => {
+        deleteFrom match {
+          case Some(d) => {
+            Await.ready(collection.deleteMany(d).toFuture, Duration(60,SECONDS))
+          }
+          case _ => {}
+        }
+        readRecordsInSteps(collection, maxValue, None)
+      }
+      case None => Future { Seq.empty[Document] }
 		}
 		Await.ready(allRecords,Duration(60, SECONDS))
 		allRecords.value.get.get
@@ -91,27 +130,25 @@ object MongoDBServiceHelper {
     Await.ready(collection.insertOne(doc).toFuture(),Duration(60, SECONDS))
     collection.count().toFuture
   }
+  
+  def insertManyRecords(mongoClient:MongoClient, recordCount:Int) 
+ 		(implicit colName:CollectionName, dbName:DatabaseName):Future[Seq[Long]]  = {
+    val database: MongoDatabase = mongoClient.getDatabase(dbName.d)
+    val collection: MongoCollection[Document] = database.getCollection(colName.d)
+    for(  x <- 1 to recordCount) {
+        Await.ready(collection.insertOne(Document("no"->x)).toFuture(),Duration(60, SECONDS))
+    }
+    collection.count().toFuture
+  }
 }
 
 class MongodbServiceSpec(env: Env) extends mutable.Specification
-    with org.specs2.specification.BeforeAfterEach
+    with DockerTestKit
     with MongoService {
 
-//  val logger = LoggerFactory.getLogger(this.getClass)
   implicit val ee = env.executionEnv
-
-  override def mongodbVersion = "3.2.6"
-  override def before() = {
-    logger.trace("BeforeEach")
-    startAllOrFail()
-  }
-
-  override def after() {
-    logger.error("AfterEach")
-    stopAllQuietly()
-  }
   
-  "the mongodb container should be ready" >> {
+  "the mongodb container should have one record" >> {
     logger.info("Port = {}",getMongodbPort())
     val mongoClient = MongoClient("mongodb://localhost:" + getMongodbPort().get)
 		implicit val c = CollectionName("test")
@@ -119,6 +156,83 @@ class MongodbServiceSpec(env: Env) extends mutable.Specification
     MongoDBServiceHelper.insertOneRecord(mongoClient) 
 	  val records = CollectionReaderHelper.readAllTheRecords(mongoClient).map( _ - "_id")
 		records  must containTheSameElementsAs(Seq(MongoDBServiceHelper.doc))
+  }
+  
+  "the mongodb should have 1 recors when retrived in the steps of 1" >> {
+    logger.info("Port = {}",getMongodbPort())
+    val mongoClient = MongoClient("mongodb://localhost:" + getMongodbPort().get)
+		implicit val c = CollectionName("test")
+		implicit val d = DatabaseName("mydb") 
+    val maxValue = 1
+    //MongoDBServiceHelper.insertManyRecords(mongoClient,maxValue)
+    val stepSize = 1
+	  val records = CollectionReaderHelper.readAllRecordsInSteps(mongoClient,stepSize).map( _ - "_id")
+		records  must containTheSameElementsAs(Seq(MongoDBServiceHelper.doc))
+  }
+
+}
+
+class MongodbServiceSpecEmptyRecords(env: Env) extends mutable.Specification
+    with DockerTestKit
+    with MongoService {
+  implicit val ee = env.executionEnv
+  "the mongodb should not have any record" >> {
+    logger.info("Port = {}",getMongodbPort())
+    val mongoClient = MongoClient("mongodb://localhost:" + getMongodbPort().get)
+		implicit val c = CollectionName("test")
+		implicit val d = DatabaseName("mydb") 
+    //MongoDBServiceHelper.insertOneRecord(mongoClient) 
+	  val records = CollectionReaderHelper.readAllTheRecords(mongoClient).map( _ - "_id")
+		records must be empty
+  }
+}
+
+class MongodbServiceSpecManyRecords(env: Env) extends mutable.Specification
+    with DockerTestKit
+    with MongoService {
+  implicit val ee = env.executionEnv
+  "the mongodb should have 1024 recors when retrived in the steps of 100" >> {
+    logger.info("Port = {}",getMongodbPort())
+    val mongoClient = MongoClient("mongodb://localhost:" + getMongodbPort().get)
+		implicit val c = CollectionName("test")
+		implicit val d = DatabaseName("mydb") 
+    val maxValue = 1024
+    MongoDBServiceHelper.insertManyRecords(mongoClient,maxValue)
+    val stepSize = 10
+	  val records = CollectionReaderHelper.readAllRecordsInSteps(mongoClient,stepSize).map( _("no").asInstanceOf[BsonInt32].intValue())
+    (records must containTheSameElementsAs(1 to maxValue))
+    (records must beSorted)
+    (records must have size(maxValue))
+  }
+  
+  "the mongodb should have 1024 recors when retrived in the steps of 512" >> {
+    logger.info("Port = {}",getMongodbPort())
+    val mongoClient = MongoClient("mongodb://localhost:" + getMongodbPort().get)
+		implicit val c = CollectionName("test")
+		implicit val d = DatabaseName("mydb") 
+    val maxValue = 1024
+    //MongoDBServiceHelper.insertManyRecords(mongoClient,maxValue)
+    val stepSize = 512
+	  val records = CollectionReaderHelper.readAllRecordsInSteps(mongoClient,stepSize).map( _("no").asInstanceOf[BsonInt32].intValue())
+    (records must containTheSameElementsAs(1 to maxValue))
+    (records must beSorted)
+    (records must have size(maxValue))
+  }
+  
+  "the mongodb should have 900 recors when we delete >900 records while reading" >> {
+    logger.info("Port = {}",getMongodbPort())
+    val mongoClient = MongoClient("mongodb://localhost:" + getMongodbPort().get)
+		implicit val c = CollectionName("test")
+		implicit val d = DatabaseName("mydb") 
+    val maxValue = 900
+    //MongoDBServiceHelper.insertManyRecords(mongoClient,maxValue)
+    val stepSize = 512
+    val records = CollectionReaderHelper.readAllRecordsInSteps(mongoClient,stepSize,Some(Document("no" -> Document("$gt" -> maxValue)))).
+                    map( _("no").asInstanceOf[BsonInt32].intValue())
+
+    (records must containTheSameElementsAs(1 to maxValue))
+    (records must beSorted)
+    (records must have size(maxValue))
   }
 
 }
