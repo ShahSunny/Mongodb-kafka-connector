@@ -1,2 +1,2 @@
 # Mongodb-kafka-connector
-Kafka connector for MongoDB, More information will be soon.
+Kafka connector for MongoDB, More information will be available soon.

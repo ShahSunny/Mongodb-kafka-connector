@@ -12,7 +12,7 @@ import scala.util.{Try, Success, Failure}
 import scala.concurrent.duration._
 import org.mongodb.scala._
 import org.sunnyshahmca.connect.mongodb._
-import org.mongodb.scala.bson.{BsonObjectId,BsonValue,BsonInt32}
+import org.mongodb.scala.bson.{BsonObjectId,BsonValue,BsonInt32,BsonArray,BsonDocument}
 import org.sunnyshahmca.connect.mongodb.collectionReader._
 import org.sunnyshahmca.connect.mongodb.common._
 
@@ -34,7 +34,14 @@ trait MongoService extends DockerKit {
     Await.ready(ports,Duration(60, SECONDS))
     ports.value
   }
-  
+  def getIPAddress():Future[String] = {
+    getContainerState(mongodbContainer).id.flatMap { (id) =>
+        Future{ docker.client.inspectContainerCmd(id).exec() }
+    }.map {
+        _.getNetworkSettings.getNetworks().get("bridge").getIpAddress()
+    }
+  }
+
   def getMongodbPort() : Option[Int] = {
     getPortsWithWait match {
       case Some(m) => { logger.trace("New port is  " + m.get(27017)); Some(m.get(27017)) }
@@ -42,6 +49,90 @@ trait MongoService extends DockerKit {
     }
   }
 }
+
+trait MongoOplogService extends DockerKit {
+
+  val DefaultMongodbPort = 27017
+  val logger = LoggerFactory.getLogger(this.getClass)
+  val replicaSetName = "r1"
+  val m1 = DockerContainer("mongo:"+mongodbVersion)
+    .withPorts(DefaultMongodbPort -> None)
+    .withEnv("NAME=m1")
+    .withReadyChecker(DockerReadyChecker.LogLineContains("waiting for connections on port"))
+    .withCommand("mongod", "--replSet", replicaSetName, "--noprealloc", "--nojournal", "--smallfiles", "--syncdelay", "0")
+
+  val m2 = DockerContainer("mongo:"+mongodbVersion)
+    .withPorts(DefaultMongodbPort -> None)
+    .withEnv("NAME=m2")
+    .withReadyChecker(DockerReadyChecker.LogLineContains("waiting for connections on port"))
+    .withCommand("mongod", "--replSet", replicaSetName, "--noprealloc", "--nojournal", "--smallfiles", "--syncdelay", "0")
+
+  val m3 = DockerContainer("mongo:"+mongodbVersion)
+    .withEnv("NAME=m3")
+    .withPorts(DefaultMongodbPort -> None)
+    .withReadyChecker(DockerReadyChecker.LogLineContains("waiting for connections on port"))
+    .withCommand("mongod", "--replSet", replicaSetName, "--noprealloc", "--nojournal", "--smallfiles", "--syncdelay", "0")
+
+  def isMongoContainerReady(dc:DockerContainer)= super.isContainerReady(dc) 
+  def mongodbVersion = "3.2.6"
+  
+  abstract override def dockerContainers: List[DockerContainer] = m1 :: m2 :: m3 :: super.dockerContainers
+  def getPortsWithWait(dc:DockerContainer) = { 
+    val ports = getContainerState(dc).getPorts()
+    Await.ready(ports,Duration(60, SECONDS))
+    ports.value
+  }
+  
+  def getIPAddress(dc:DockerContainer):String = {
+    val ipFuture = getContainerState(dc).id.flatMap { (id) =>
+        Future{ docker.client.inspectContainerCmd(id).exec() }
+    }.map {
+        _.getNetworkSettings.getIpAddress()
+    }
+    Await.ready(ipFuture,Duration(60,SECONDS))
+    ipFuture.value.get.get
+  }
+
+  def getMongodbPort(dc:DockerContainer) : Option[Int] = {
+    getPortsWithWait(dc) match {
+      case Some(m) => { logger.trace("New port is  " + m.get(27017)); Some(m.get(27017)) }
+      case None => { logger.error("Ports is Failure, Container start failed!"); None }
+    }
+  }
+  
+  def initiateCluster() = {
+    val cfg = Document(
+      "_id" -> replicaSetName,
+      "members" -> BsonArray(
+        BsonDocument("_id" -> 0, "host" -> (getIPAddress(m1)+":27017")),
+        BsonDocument("_id" -> 1, "host" -> (getIPAddress(m2)+":27017")),
+        BsonDocument("_id" -> 2, "host" -> (getIPAddress(m3)+":27017"))
+      )
+    )
+    logger.trace("CFG = {}",cfg)
+    val mongoClient = MongoClient("mongodb://"+getIPAddress(m1)+":27017")
+    val database: MongoDatabase = mongoClient.getDatabase("admin")
+    Await.ready(database.runCommand(Document("replSetInitiate" -> cfg)).toFuture, Duration(60, SECONDS))
+    mongoClient.close()
+  }
+
+}
+
+
+
+class MongodbServiceSpecOplogReader(env: Env) extends mutable.Specification
+    with DockerTestKit
+    with MongoOplogService {
+  implicit val ee = env.executionEnv
+  "Read oplog" >> {
+    initiateCluster()
+//    val ipAddress = getIPAddress()
+//    Await.ready(ipAddress,Duration(60, SECONDS))
+//		logger.info("ipAddress = {}",ipAddress.value.get.get)
+    true must_== true
+  }
+}  
+
 
 case class CollectionName(d:String)
 case class DatabaseName(d:String)
@@ -193,6 +284,9 @@ class MongodbServiceSpecManyRecords(env: Env) extends mutable.Specification
   implicit val ee = env.executionEnv
   "the mongodb should have 1024 recors when retrived in the steps of 100" >> {
     logger.info("Port = {}",getMongodbPort())
+//    val ipAddress = getIPAddress()
+//    Await.ready(ipAddress,Duration(60, SECONDS))
+//		logger.info("ipAddress = {}",ipAddress.value.get.get)
     val mongoClient = MongoClient("mongodb://localhost:" + getMongodbPort().get)
 		implicit val c = CollectionName("test")
 		implicit val d = DatabaseName("mydb") 
@@ -221,6 +315,7 @@ class MongodbServiceSpecManyRecords(env: Env) extends mutable.Specification
   
   "the mongodb should have 900 recors when we delete >900 records while reading" >> {
     logger.info("Port = {}",getMongodbPort())
+
     val mongoClient = MongoClient("mongodb://localhost:" + getMongodbPort().get)
 		implicit val c = CollectionName("test")
 		implicit val d = DatabaseName("mydb") 
