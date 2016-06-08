@@ -122,11 +122,11 @@ trait MongoOplogService extends DockerKit {
  
 }
 
-class MongodbServiceSpecOplogReader(env: Env) extends mutable.Specification
+class MongodbServiceSpecOplogReaderSingleInsert(env: Env) extends mutable.Specification
     with DockerTestKit
     with MongoOplogService {
   implicit val ee = env.executionEnv
-  "Read oplog" >> {
+  "Read oplog for one insert" >> {
     initiateCluster()
     val mongoClient = getMongoClient()
 		implicit val c = CollectionName("test")
@@ -155,6 +155,48 @@ class MongodbServiceSpecOplogReader(env: Env) extends mutable.Specification
   }
 }  
 
+class MongodbServiceSpecOplogReaderMultiInsert(env: Env) extends mutable.Specification
+    with DockerTestKit
+    with MongoOplogService {
+  implicit val ee = env.executionEnv
+  "Read oplog for (2*RecordPoolerMaxRecords - 1) insert" >> {
+    initiateCluster()
+    val mongoClient = getMongoClient()
+		implicit val c = CollectionName("test")
+		implicit val d = DatabaseName("mydb")
+    val recordPoolerMaxRecords = 8:Int
+    val recordsToInsert = recordPoolerMaxRecords*2 - 3
+    logger.info("Before InsertMany")
+    MongoDBServiceHelper.insertManyRecords(mongoClient, recordsToInsert)
+    logger.info("After InsertMany")
+    //Thread.sleep(60000 * 5)
+    implicit def currentTimeMillis():Long = System.currentTimeMillis()
+    implicit val sl = new oplogReader.SleeperImpl 
+    val oplogObserverCreator = new oplogReader.MongodbOplogObserverCreator(mongoClient, oplogReader.ObserverRestartTimeout(Duration(10,MINUTES)))
+    val recordPooler = new oplogReader.RecordPoolerImpl(None, recordPoolerMaxRecords, oplogObserverCreator)
+    val maxWaitAllowed = Duration(10,SECONDS)
+    val maxWaitForSubsequentRecords = Duration(1,SECONDS)
+    
+    logger.info("Before first read request")
+    var resultRecordsFuture = oplogReader.oplogDataWatcher(recordPooler,maxWaitAllowed,maxWaitForSubsequentRecords)
+    Await.ready(resultRecordsFuture,Duration(60,SECONDS))
+    val firstSlotRecords = resultRecordsFuture.value.get.get.map(_._2)
+    logger.info("After first read request")
+    
+    logger.info("Before second read request")
+    val secondResultRecordsFuture = oplogReader.oplogDataWatcher(recordPooler,maxWaitAllowed,maxWaitForSubsequentRecords)
+    Await.ready(secondResultRecordsFuture,Duration(60,SECONDS))
+    val secondSlotRecords = secondResultRecordsFuture.value.get.get.map(_._2)
+    logger.info("After second read request")
+    val allRecords = firstSlotRecords ++ secondSlotRecords    
+    //logger.info("All oplog records = {}", allRecords)
+    (firstSlotRecords must have length(recordPoolerMaxRecords)) 
+    (secondSlotRecords must have length((recordsToInsert+1) - recordPoolerMaxRecords))
+    ( allRecords must have length(recordsToInsert + 1) )
+    ( allRecords.filter{_("op") == BsonString("i")}.
+       map{ _("o").asInstanceOf[BsonDocument].get("no").asInstanceOf[BsonInt32].getValue } must_== (1 to recordsToInsert) )
+  }
+} 
 
 case class CollectionName(d:String)
 case class DatabaseName(d:String)
