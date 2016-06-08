@@ -12,9 +12,10 @@ import scala.util.{Try, Success, Failure}
 import scala.concurrent.duration._
 import org.mongodb.scala._
 import org.sunnyshahmca.connect.mongodb._
-import org.mongodb.scala.bson.{BsonObjectId,BsonValue,BsonInt32,BsonArray,BsonDocument}
+import org.mongodb.scala.bson.{BsonObjectId,BsonString,BsonValue,BsonInt32,BsonArray,BsonDocument}
 import org.sunnyshahmca.connect.mongodb.collectionReader._
 import org.sunnyshahmca.connect.mongodb.common._
+import org.sunnyshahmca.connect.mongodb.oplogReader
 
 trait MongoService extends DockerKit {
 
@@ -57,13 +58,13 @@ trait MongoOplogService extends DockerKit {
   val replicaSetName = "r1"
   val m1 = DockerContainer("mongo:"+mongodbVersion)
     .withPorts(DefaultMongodbPort -> None)
-    .withEnv("NAME=m1")
+    .withEnv("NAME=m1")//This is added so that library thinks that all three MongoDB DockerContainers different and not same
     .withReadyChecker(DockerReadyChecker.LogLineContains("waiting for connections on port"))
     .withCommand("mongod", "--replSet", replicaSetName, "--noprealloc", "--nojournal", "--smallfiles", "--syncdelay", "0")
 
   val m2 = DockerContainer("mongo:"+mongodbVersion)
     .withPorts(DefaultMongodbPort -> None)
-    .withEnv("NAME=m2")
+    .withEnv("NAME=m2")//This is added so that library thinks that all three MongoDB DockerContainers different and not same
     .withReadyChecker(DockerReadyChecker.LogLineContains("waiting for connections on port"))
     .withCommand("mongod", "--replSet", replicaSetName, "--noprealloc", "--nojournal", "--smallfiles", "--syncdelay", "0")
 
@@ -87,7 +88,7 @@ trait MongoOplogService extends DockerKit {
     val ipFuture = getContainerState(dc).id.flatMap { (id) =>
         Future{ docker.client.inspectContainerCmd(id).exec() }
     }.map {
-        _.getNetworkSettings.getIpAddress()
+        _.getNetworkSettings.getNetworks().get("bridge").getIpAddress()
     }
     Await.ready(ipFuture,Duration(60,SECONDS))
     ipFuture.value.get.get
@@ -116,9 +117,10 @@ trait MongoOplogService extends DockerKit {
     mongoClient.close()
   }
 
+  def getMongoClient() = MongoClient("mongodb://"+getIPAddress(m1) + "," + getIPAddress(m2) + "," +
+                                      getIPAddress(m3)  + "/?replicaSet="+replicaSetName)
+ 
 }
-
-
 
 class MongodbServiceSpecOplogReader(env: Env) extends mutable.Specification
     with DockerTestKit
@@ -126,10 +128,30 @@ class MongodbServiceSpecOplogReader(env: Env) extends mutable.Specification
   implicit val ee = env.executionEnv
   "Read oplog" >> {
     initiateCluster()
-//    val ipAddress = getIPAddress()
-//    Await.ready(ipAddress,Duration(60, SECONDS))
-//		logger.info("ipAddress = {}",ipAddress.value.get.get)
-    true must_== true
+    val mongoClient = getMongoClient()
+		implicit val c = CollectionName("test")
+		implicit val d = DatabaseName("mydb") 
+    MongoDBServiceHelper.insertOneRecord(mongoClient)
+    //Thread.sleep(60000 * 5)
+    implicit def currentTimeMillis():Long = System.currentTimeMillis()
+    implicit val sl = new oplogReader.SleeperImpl 
+    val oplogObserverCreator = new oplogReader.MongodbOplogObserverCreator(mongoClient, oplogReader.ObserverRestartTimeout(Duration(10,MINUTES)))
+    val recordPooler = new oplogReader.RecordPoolerImpl(None,8, oplogObserverCreator)
+    val maxWaitAllowed = Duration(10,SECONDS)
+    val maxWaitForSubsequentRecords = Duration(1,SECONDS)
+    val resultRecordsFuture = oplogReader.oplogDataWatcher(recordPooler,maxWaitAllowed,maxWaitForSubsequentRecords)
+    Await.ready(resultRecordsFuture,Duration(60,SECONDS))
+    val records = resultRecordsFuture.value.get.get.map(_._2)
+    ( records must have length(2) )
+    ( records(0)("op") must_== BsonString("c") )
+    ( records(0)("ns") must_== BsonString(d.d + ".$cmd") )
+    ( records(0)("o") must_== BsonDocument("create" -> "test") )
+    
+    ( records(1)("op") must_== BsonString("i") )
+    ( records(1)("ns") must_== BsonString(d.d + "." + c.d) )
+    val insertedRecord = records(1)("o").asInstanceOf[BsonDocument]
+    insertedRecord.remove("_id")
+    ( Document(insertedRecord) must_== MongoDBServiceHelper.doc  )
   }
 }  
 
