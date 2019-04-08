@@ -1,5 +1,5 @@
 name := "Mongodb-kafka-connector"
-organization := "org.sunnyshahmca"
+organization := "org.sunnyshah"
 version := "0.1"
 scalaVersion := "2.11.8"
 resolvers += "scalaz-bintray" at "http://dl.bintray.com/scalaz/releases"
